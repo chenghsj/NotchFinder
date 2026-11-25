@@ -6,6 +6,31 @@ Browse files, preview documents with Quick Look, and reuse clipboard items from 
 
 Requires macOS 14 Sonoma or later. A notch is optional. The interface is available in English, Traditional Chinese, Simplified Chinese, and Japanese.
 
+## Install
+
+The prebuilt DMG requires an Apple Silicon Mac running macOS 14 Sonoma or later.
+
+Download the `.dmg` from **Assets**, then open it in Finder. [GitHub Releases](https://github.com/chenghsj/NotchFinder/releases)
+
+To download and open the `v0.1.0` DMG from Terminal, run the following.
+
+```sh
+dmg="$HOME/Downloads/NotchFinder-0.1.0-arm64.dmg"
+curl -fL -o "$dmg" \
+  "https://github.com/chenghsj/NotchFinder/releases/download/v0.1.0/NotchFinder-0.1.0-arm64.dmg" &&
+  open "$dmg"
+```
+
+1. Drag **Notch Finder** from the disk image to **Applications**, then eject the disk image.
+2. Open **Notch Finder** from **Applications**.
+
+### Open for the first time
+
+The preview uses an ad hoc signature. If macOS displays a verification warning, confirm that the DMG came from this project's GitHub Releases before proceeding.
+
+1. After trying to open Notch Finder, go to **System Settings → Privacy & Security**.
+2. Scroll to **Security**, choose **Open Anyway**, and confirm when prompted. [Apple's instructions](https://support.apple.com/en-us/102445)
+
 ## Features
 
 - Browse folders in tabs, each with its own back and forward history. Switch between Detailed List, Compact List, and Icon View. Expand folders in place in list views, or jump to a parent folder using the path bar.
