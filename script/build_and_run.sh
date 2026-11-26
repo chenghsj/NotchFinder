@@ -35,6 +35,31 @@ test_app() {
   /usr/bin/osascript -l JavaScript "$PROJECT_DIR/script/test_app.js" "$1" "$BUNDLE_ID" "$APP_BUNDLE"
 }
 
+binary_uuids() {
+  xcrun dwarfdump --uuid "$1" | /usr/bin/awk '/^UUID:/ { print $2 }' | LC_ALL=C /usr/bin/sort
+}
+
+archive_release_symbols() (
+  local app_uuids symbols_dir dsym_name source_dsym stage
+  app_uuids="$(binary_uuids "$APP_BINARY")"
+  source_dsym="$BIN_DIR/$APP_NAME.dSYM"
+  if [[ -z "$app_uuids" || "$(binary_uuids "$source_dsym")" != "$app_uuids" ]]; then
+    printf 'The Release dSYM does not match %s.\n' "$APP_BINARY" >&2
+    exit 1
+  fi
+
+  symbols_dir="$BUILD_DIR/dist/symbols"
+  dsym_name="$APP_NAME-$APP_VERSION-$BUILD_NUMBER-$(printf '%s\n' "$app_uuids" | /usr/bin/paste -sd - -).app.dSYM"
+  if [[ ! -d "$symbols_dir/$dsym_name" ]]; then
+    mkdir -p "$symbols_dir"
+    stage="$(mktemp -d "$symbols_dir/.notchfinder.XXXXXXXX")"
+    trap 'rm -rf -- "$stage"' EXIT
+    /usr/bin/ditto "$source_dsym" "$stage/$dsym_name"
+    /bin/mv -n "$stage/$dsym_name" "$symbols_dir/"
+  fi
+  printf 'Release dSYM: %s\n' "$symbols_dir/$dsym_name" >&2
+)
+
 cleanup_test_app() {
   local status=$?
   trap - EXIT
@@ -102,7 +127,7 @@ SWIFT_BUILD=(swift build --package-path "$PROJECT_DIR" --scratch-path "$BUILD_DI
   --configuration "$CONFIGURATION" --sdk "$SDK_PATH"
   -Xlinker -platform_version -Xlinker macos -Xlinker "$MACOS_MIN_VERSION" -Xlinker "$SDK_VERSION")
 if [[ "$CONFIGURATION" == "release" ]]; then
-  SWIFT_BUILD+=(-debug-info-format none)
+  SWIFT_BUILD+=(-debug-info-format dwarf)
 fi
 if [[ "${NOTCH_FINDER_DISABLE_SWIFTPM_SANDBOX:-0}" == "1" ]]; then
   SWIFT_BUILD+=(--disable-sandbox)
@@ -116,6 +141,25 @@ install -m 755 "$BIN_DIR/$APP_NAME" "$APP_BINARY"
 SPARKLE_FRAMEWORK="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
 rm -rf -- "$SPARKLE_FRAMEWORK"
 /usr/bin/ditto "$BIN_DIR/Sparkle.framework" "$SPARKLE_FRAMEWORK"
+SPARKLE_VERSION="$SPARKLE_FRAMEWORK/Versions/Current"
+
+if [[ "$CONFIGURATION" == "release" ]]; then
+  /usr/bin/strip -S -x "$APP_BINARY"
+  APP_ARCHITECTURES="$(/usr/bin/lipo -archs "$APP_BINARY")"
+  # Keep Sparkle's architecture slices aligned with single-architecture releases.
+  if [[ "$APP_ARCHITECTURES" != *" "* ]]; then
+    for executable in "$SPARKLE_VERSION/Sparkle" "$SPARKLE_VERSION/Autoupdate" \
+      "$SPARKLE_VERSION"/Updater.app/Contents/MacOS/* \
+      "$SPARKLE_VERSION"/XPCServices/*.xpc/Contents/MacOS/*; do
+      [[ -f "$executable" ]] || continue
+      SPARKLE_ARCHITECTURES="$(/usr/bin/lipo -archs "$executable")"
+      [[ "$SPARKLE_ARCHITECTURES" != "$APP_ARCHITECTURES" ]] || continue
+      /usr/bin/lipo -thin "$APP_ARCHITECTURES" "$executable" -output "$executable.thin"
+      /usr/bin/install -m 755 "$executable.thin" "$executable"
+      rm "$executable.thin"
+    done
+  fi
+fi
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -159,13 +203,16 @@ if [[ -z "$SIGNING_IDENTITY" ]]; then
     /usr/bin/awk '/"Apple Development:/ {identity = $2; count++} END {if (count == 1) print identity}')"
 fi
 SIGN=(/usr/bin/codesign --force --sign "${SIGNING_IDENTITY:--}" --timestamp=none)
-SPARKLE_VERSION="$SPARKLE_FRAMEWORK/Versions/Current"
 for component in "$SPARKLE_VERSION/Autoupdate" "$SPARKLE_VERSION/Updater.app" "$SPARKLE_VERSION"/XPCServices/*.xpc; do
   [[ -e "$component" ]] || continue
   "${SIGN[@]}" --preserve-metadata=identifier,entitlements "$component"
 done
 "${SIGN[@]}" "$SPARKLE_FRAMEWORK"
 "${SIGN[@]}" "$APP_BUNDLE"
+
+if [[ "$CONFIGURATION" == "release" && -z "$TEST_DIR" ]]; then
+  archive_release_symbols
+fi
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"

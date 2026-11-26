@@ -62,11 +62,23 @@ uvx --from dmgbuild==1.6.7 dmgbuild -s script/dmg_settings.py \
   -D app=dist/NotchFinder.app "Notch Finder" dist/NotchFinder-preview.dmg
 ```
 
+Release builds archive the app's dSYM separately in `dist/symbols/`. Keep the dSYM for each shipped build so crash reports can be matched by UUID.
+
 ### Prepare a signed update
 
-1. Build the app with its release version and a build number higher than the last published build. Set `NOTCH_FINDER_VERSION` and `NOTCH_FINDER_BUILD_NUMBER` in the environment when running `./script/build_and_run.sh --build`. Name the packaged DMG `NotchFinder-VERSION-arm64.dmg` for an Apple Silicon build.
+1. Run `./script/build_and_run.sh --build` with `NOTCH_FINDER_BUILD_CONFIGURATION=release`, the release version in `NOTCH_FINDER_VERSION`, and a `NOTCH_FINDER_BUILD_NUMBER` higher than the last published build. Name the packaged DMG `NotchFinder-VERSION-arm64.dmg` for an Apple Silicon build.
 2. From the release maintainer's Mac, run `SPARKLE_BIN_DIR=/path/to/sparkle/bin bash script/sign_preview_update.sh dist/NotchFinder-VERSION-arm64.dmg`. Use the signing tools from the pinned Sparkle release. The script uses the `local.notchfinder.preview` key in the login Keychain and produces the detached DMG signature and the signed `updates/preview.xml` feed.
 3. Publish the DMG and its `.sig` file together in the matching GitHub Release. Once both assets are publicly available, publish the generated `updates/preview.xml` on `main`.
+
+### Symbolicate a crash report
+
+With Python 3 and full Xcode installed, pass a macOS `.ips` crash report to this command.
+
+```sh
+./script/symbolicate_crash.py path/to/report.ips
+```
+
+The command matches the report's image UUIDs to dSYMs in `dist/symbols/` and saves `report.symbolicated.ips` next to the original. Open the result in Xcode to see function names and available source locations. Use `--symbols-dir` for a separate dSYM archive or `--output` to choose where to save the result.
 
 ## Usage
 
