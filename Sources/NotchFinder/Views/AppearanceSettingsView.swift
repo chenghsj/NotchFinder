@@ -40,10 +40,14 @@ struct AppearanceSettingsView: View {
                 }
                 .pickerStyle(.segmented)
             }
-            Section(L10n.text("面板大小")) {
+            Section {
                 Toggle(L10n.text("記住最後使用的尺寸"), isOn: $settings.remembersSize)
                     .onChange(of: settings.remembersSize) { _, value in if value { saveSize() } }
                 Button(L10n.text("恢復預設尺寸"), action: restoreSize)
+            } header: {
+                Text(L10n.text("面板大小"))
+            } footer: {
+                Text(L10n.text("關閉後，面板下次展開時會使用預設尺寸。"))
             }
         }
         .formStyle(.grouped)

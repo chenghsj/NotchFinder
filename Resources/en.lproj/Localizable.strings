@@ -195,6 +195,7 @@
 "一般" = "General";
 "介面語言" = "Interface Language";
 "記住最後使用的尺寸" = "Remember Last Size";
+"關閉後，面板下次展開時會使用預設尺寸。" = "Turn this off to use the default size the next time the panel opens.";
 "記錄歷史" = "Record History";
 "設定…" = "Settings…";
 "詳細列表" = "Detailed List";

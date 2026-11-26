@@ -41,7 +41,8 @@ final class NotchController: NSObject {
         self.clipboardHistory = clipboardHistory
         tabs = BrowserTabs(initialDirectory: settings.startDirectory, defaults: settings.defaults,
                            clipboardHistory: clipboardHistory)
-        preferredPanelSize = settings.remembersSize ? NotchGeometry.savedPanelSize() : NotchGeometry.defaultPanelSize
+        preferredPanelSize = settings.remembersSize
+            ? NotchGeometry.savedPanelSize(in: settings.defaults) : NotchGeometry.defaultPanelSize
         super.init()
         browser.onPreview = { [weak self] items in self?.showPreview(items) }
         tabs.onActivate = { [weak self] in self?.panel?.closePreview() }
@@ -118,7 +119,7 @@ final class NotchController: NSObject {
     }
 
     func savePreferredSize() {
-        if settings.remembersSize { NotchGeometry.savePanelSize(preferredPanelSize) }
+        if settings.remembersSize { NotchGeometry.savePanelSize(preferredPanelSize, in: settings.defaults) }
     }
 
     func restoreDefaultSize() {
@@ -194,7 +195,10 @@ final class NotchController: NSObject {
         let panel = panel ?? makePanel()
         self.panel = panel
         let opening = currentDisplay == nil
-        if opening { rememberPasteTarget() }
+        if opening {
+            rememberPasteTarget()
+            if !settings.remembersSize { preferredPanelSize = NotchGeometry.defaultPanelSize }
+        }
         currentDisplay = display
         hover.didShow(manually: manually)
         tabs.setPanelVisible(true)

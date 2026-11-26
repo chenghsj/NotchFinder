@@ -20,6 +20,44 @@ struct ArchitectureRegressionTests {
         #expect(NotchSettings(defaults: fixture.defaults).interfaceLanguage == .system)
     }
 
+    @Test func disablingRememberLastSizeRestoresDefaultOnNextOpen() throws {
+        let fixture = try TestWorkspace()
+        defer { fixture.cleanUp() }
+        let application = NSApplication.shared
+        let previousAppearance = application.appearance
+        defer { application.appearance = previousAppearance }
+        let settings = NotchSettings(defaults: fixture.defaults)
+        settings.startupFolder = .custom
+        settings.customFolder = fixture.directory.path
+        settings.hoverEnabled = false
+        settings.autoHide = false
+        settings.animation = .off
+        let savedSize = CGSize(width: 540, height: 280)
+        NotchGeometry.savePanelSize(savedSize, in: fixture.defaults)
+        let controller = NotchController(settings: settings, shortcuts: PanelShortcuts(defaults: fixture.defaults),
+                                         clipboardHistory: ClipboardHistory(defaults: fixture.defaults,
+                                                                            storageURL: fixture.directory.appending(path: "history.plist")))
+        let previousWindows = Set(application.windows.map(ObjectIdentifier.init))
+        controller.start()
+        controller.showPanel()
+        defer { controller.prepareToShowPreferences() }
+
+        let panel = try #require(application.windows.first { $0.isVisible && !previousWindows.contains(ObjectIdentifier($0)) })
+        let screen = try #require(panel.screen)
+        let notch = NotchGeometry(screen: screen)
+        let expectedCustom = NotchGeometry.panelFrame(on: screen, notch: notch, requestedSize: savedSize).size
+        let expectedDefault = NotchGeometry.panelFrame(on: screen, notch: notch, requestedSize: NotchGeometry.defaultPanelSize).size
+        #expect(panel.frame.size == expectedCustom)
+
+        settings.remembersSize = false
+        #expect(panel.frame.size == expectedCustom)
+        controller.prepareToShowPreferences()
+        controller.showPanel()
+
+        #expect(panel.frame.size == expectedDefault)
+        #expect(NotchGeometry.savedPanelSize(in: fixture.defaults) == savedSize)
+    }
+
     @Test func startupPermissionCheckCoversTheOpeningFolderAndTrash() throws {
         let fixture = try TestWorkspace()
         defer { fixture.cleanUp() }

@@ -12,12 +12,12 @@ The prebuilt DMG requires an Apple Silicon Mac running macOS 14 Sonoma or later.
 
 Download the `.dmg` from **Assets**, then open it in Finder. [GitHub Releases](https://github.com/chenghsj/NotchFinder/releases)
 
-To download and open the `v0.1.0` DMG from Terminal, run the following.
+To download and open the `v0.1.1` DMG from Terminal, run the following.
 
 ```sh
-dmg="$HOME/Downloads/NotchFinder-0.1.0-arm64.dmg"
+dmg="$HOME/Downloads/NotchFinder-0.1.1-arm64.dmg"
 curl -fL -o "$dmg" \
-  "https://github.com/chenghsj/NotchFinder/releases/download/v0.1.0/NotchFinder-0.1.0-arm64.dmg" &&
+  "https://github.com/chenghsj/NotchFinder/releases/download/v0.1.1/NotchFinder-0.1.1-arm64.dmg" &&
   open "$dmg"
 ```
 
