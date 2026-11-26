@@ -1,11 +1,20 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><!-- sparkle-sign-warning:
+<?xml version="1.0" standalone="yes"?><!-- sparkle-sign-warning:
 IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
 --><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
-        <title>Notch Finder Preview</title>
-        <link>https://github.com/chenghsj/NotchFinder/releases</link>
+        <title>NotchFinder</title>
+        <item>
+            <title>0.1.2</title>
+            <pubDate>Thu, 26 Nov 2026 17:55:48 +0800</pubDate>
+            <link>https://github.com/chenghsj/NotchFinder/releases/tag/v0.1.2</link>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/chenghsj/NotchFinder/releases/download/v0.1.2/NotchFinder-0.1.2-arm64.dmg" length="6529721" type="application/octet-stream" sparkle:edSignature="1ElSUpbFsFzrS7mZa3uAGKA6exn26mZXA1XGjZ+wq4gYWAdWtnW4UF8qFj6MboJ8goLu5+kL9PpbTJuPv3C0DQ=="></enclosure>
+        </item>
     </channel>
 </rss><!-- sparkle-signatures:
-edSignature: AF1wYUr3Mo+71DYuZNS5981maM7dR8IsgmyZIUeAPcbE/o/U0heJbqC/IMw2t8Kp0ENJLLL4yfswN2HijwVKCA==
-length: 528
+edSignature: KcbSk/B5AACquKabT8C+Uzjguh/SlsU2g7hdibDOf4W+kMxSYscc1jduoJYGqiFb32yCP+qhmg0FLzrabOcbCQ==
+length: 1220
 -->
