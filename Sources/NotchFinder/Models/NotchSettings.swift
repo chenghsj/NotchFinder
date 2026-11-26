@@ -44,21 +44,25 @@ enum FileSort: String, CaseIterable {
 }
 
 enum FileDisplayMode: String, CaseIterable {
-    case icons, details, compact
+    case icons
+    case list = "details"
+    case columns, gallery
 
     var title: String {
         switch self {
-        case .details: L10n.text("詳細列表")
-        case .compact: L10n.text("精簡列表")
-        case .icons: L10n.text("圖示格")
+        case .icons: L10n.text("圖像")
+        case .list: L10n.text("列表")
+        case .columns: L10n.text("直欄")
+        case .gallery: L10n.text("圖庫")
         }
     }
 
     var symbol: String {
         switch self {
-        case .details: "list.bullet"
-        case .compact: "text.alignleft"
         case .icons: "square.grid.2x2"
+        case .list: "list.bullet"
+        case .columns: "rectangle.split.3x1"
+        case .gallery: "squares.below.rectangle"
         }
     }
 }
@@ -110,11 +114,13 @@ enum PreferencesPage: String, CaseIterable {
 @Observable
 final class NotchSettings {
     static let sidebarWidths: ClosedRange<Double> = 112...260
+    private static let locationDisplayModesKey = "fileDisplayModesByLocation"
     @ObservationIgnored let defaults: UserDefaults
     @ObservationIgnored var colorModeDidChange: ((PanelTheme) -> Void)?
     @ObservationIgnored var dockIconVisibilityDidChange: ((Bool) -> Void)?
     @ObservationIgnored var interfaceSizeDidChange: (() -> Void)?
     @ObservationIgnored var interfaceLanguageDidChange: ((InterfaceLanguage) -> Void)?
+    @ObservationIgnored var updatePreferencesDidChange: (() -> Void)?
 
     private(set) var appearance: PanelAppearance {
         didSet {
@@ -138,6 +144,31 @@ final class NotchSettings {
             dockIconVisibilityDidChange?(showsDockIcon)
         }
     }
+    var checksForUpdates: Bool {
+        didSet {
+            guard checksForUpdates != oldValue else { return }
+            defaults.set(checksForUpdates, forKey: "checksForUpdates")
+            updatePreferencesDidChange?()
+        }
+    }
+    var automaticallyDownloadsUpdates: Bool {
+        didSet {
+            guard automaticallyDownloadsUpdates != oldValue else { return }
+            defaults.set(automaticallyDownloadsUpdates, forKey: "automaticallyDownloadsUpdates")
+            updatePreferencesDidChange?()
+        }
+    }
+    var automaticallyInstallsUpdates: Bool {
+        didSet {
+            guard automaticallyInstallsUpdates != oldValue else { return }
+            defaults.set(automaticallyInstallsUpdates, forKey: "automaticallyInstallsUpdates")
+            updatePreferencesDidChange?()
+        }
+    }
+    var installsUpdatesOnQuit: Bool {
+        checksForUpdates && automaticallyDownloadsUpdates && automaticallyInstallsUpdates
+    }
+    var updateReadyToInstall = false
     var hoverEnabled: Bool { didSet { defaults.set(hoverEnabled, forKey: "hoverEnabled") } }
     var hoverDelay: Double { didSet { defaults.set(hoverDelay, forKey: "hoverDelay") } }
     var autoHide: Bool { didSet { defaults.set(autoHide, forKey: "autoHide") } }
@@ -158,7 +189,10 @@ final class NotchSettings {
     var foldersFirst: Bool { didSet { defaults.set(foldersFirst, forKey: "foldersFirst") } }
     var groupsByAddedDate: Bool { didSet { defaults.set(groupsByAddedDate, forKey: "groupsByAddedDate") } }
     var cleansDiskImageAfterInstall: Bool { didSet { defaults.set(cleansDiskImageAfterInstall, forKey: "cleansDiskImageAfterInstall") } }
-    var displayMode: FileDisplayMode { didSet { defaults.set(displayMode.rawValue, forKey: "fileDisplayMode") } }
+    var defaultDisplayMode: FileDisplayMode {
+        didSet { defaults.set(defaultDisplayMode.rawValue, forKey: "fileDisplayMode") }
+    }
+    private var locationDisplayModes: [String: FileDisplayMode]
     var showsClipboardInSidebar: Bool { didSet { defaults.set(showsClipboardInSidebar, forKey: "showsClipboardInSidebar") } }
     private var sidebarWidthOverride: Double? { didSet { defaults.set(sidebarWidthOverride, forKey: "sidebarWidth") } }
 
@@ -175,6 +209,9 @@ final class NotchSettings {
         appearance = PanelAppearance(defaults: defaults)
         interfaceLanguage = defaults.string(forKey: "interfaceLanguage").flatMap(InterfaceLanguage.init(rawValue:)) ?? .system
         showsDockIcon = defaults.bool(forKey: "showsDockIcon")
+        checksForUpdates = defaults.object(forKey: "checksForUpdates") as? Bool ?? true
+        automaticallyDownloadsUpdates = defaults.bool(forKey: "automaticallyDownloadsUpdates")
+        automaticallyInstallsUpdates = defaults.bool(forKey: "automaticallyInstallsUpdates")
         hoverEnabled = defaults.object(forKey: "hoverEnabled") as? Bool ?? true
         hoverDelay = Self.delay(defaults.object(forKey: "hoverDelay"), fallback: 0.15)
         autoHide = defaults.object(forKey: "autoHide") as? Bool ?? true
@@ -197,10 +234,25 @@ final class NotchSettings {
         foldersFirst = defaults.object(forKey: "foldersFirst") as? Bool ?? true
         groupsByAddedDate = defaults.object(forKey: "groupsByAddedDate") as? Bool ?? true
         cleansDiskImageAfterInstall = defaults.bool(forKey: "cleansDiskImageAfterInstall")
-        displayMode = defaults.string(forKey: "fileDisplayMode").flatMap(FileDisplayMode.init(rawValue:)) ?? .details
+        // The removed Compact List preference also falls back to List.
+        defaultDisplayMode = defaults.string(forKey: "fileDisplayMode").flatMap(FileDisplayMode.init(rawValue:)) ?? .list
+        locationDisplayModes = defaults.dictionary(forKey: Self.locationDisplayModesKey)?.compactMapValues {
+            ($0 as? String).flatMap(FileDisplayMode.init(rawValue:))
+        } ?? [:]
         showsClipboardInSidebar = defaults.object(forKey: "showsClipboardInSidebar") as? Bool ?? true
         sidebarWidthOverride = (defaults.object(forKey: "sidebarWidth") as? Double)
             .flatMap { $0.isFinite ? Self.clampSidebarWidth($0) : nil }
+    }
+
+    func displayMode(for destination: FileBrowser.Destination) -> FileDisplayMode {
+        locationDisplayModes[destination.displayModeKey] ?? defaultDisplayMode
+    }
+
+    func setDisplayMode(_ mode: FileDisplayMode, for destination: FileBrowser.Destination) {
+        let key = destination.displayModeKey
+        guard locationDisplayModes[key] != mode else { return }
+        locationDisplayModes[key] = mode
+        defaults.set(locationDisplayModes.mapValues(\.rawValue), forKey: Self.locationDisplayModesKey)
     }
 
     func selectColorMode(_ mode: PanelTheme) { appearance.selectMode(mode) }

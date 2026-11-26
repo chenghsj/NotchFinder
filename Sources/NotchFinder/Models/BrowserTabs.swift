@@ -101,12 +101,12 @@ final class BrowserTabs {
 
     private func activate(_ tab: Tab) {
         onActivate?()
-        active.browser.setFolderMonitoring(false)
+        active.browser.setContentMonitoring(false)
         active.browser.cancelEditing()
         showsClipboard = false
         active = tab
-        tab.browser.activate()
         updateMonitoring()
+        tab.browser.activate()
         rememberLocation()
     }
 
@@ -118,8 +118,8 @@ final class BrowserTabs {
         }
         let previousDestination = browser.destination
         showsClipboard = false
-        change(browser)
         updateMonitoring()
+        change(browser)
         if isPanelVisible, previousDestination == browser.destination {
             browser.reload(quietly: true)
         }
@@ -128,7 +128,7 @@ final class BrowserTabs {
 
     private func updateMonitoring() {
         clipboardHistory.setPreviewVisible(isPanelVisible && showsClipboard)
-        active.browser.setFolderMonitoring(isPanelVisible && !showsClipboard)
+        active.browser.setContentMonitoring(isPanelVisible && !showsClipboard)
     }
 
     private func trackLocation(of browser: FileBrowser) {

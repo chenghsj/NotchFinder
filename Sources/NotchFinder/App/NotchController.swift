@@ -65,7 +65,7 @@ final class NotchController: NSObject {
         workspace.addObserver(self, selector: #selector(workspaceDidActivateApplication(_:)),
                               name: NSWorkspace.didActivateApplicationNotification, object: nil)
         for event in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification, NSWorkspace.didRenameVolumeNotification] {
-            workspace.addObserver(self, selector: #selector(refreshSidebarVolumes), name: event, object: nil)
+            workspace.addObserver(self, selector: #selector(workspaceVolumeDidChange(_:)), name: event, object: nil)
         }
 
         // Sample pointer location without installing an event tap or a window over the menu bar.
@@ -130,8 +130,16 @@ final class NotchController: NSObject {
         panel.animatedContent.setExpanded(true, animated: false) { [weak self] in self?.browser.enableFileIcons() }
     }
 
-    @objc private func refreshSidebarVolumes() {
-        browser.sidebar.refreshVolumes()
+    @objc private nonisolated func workspaceVolumeDidChange(_ notification: Notification) {
+        let unmountedVolume = notification.name == NSWorkspace.didUnmountNotification
+            ? notification.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL : nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.browser.sidebar.refreshVolumes()
+            if let unmountedVolume {
+                for tab in self.tabs.items { tab.browser.volumeDidUnmount(at: unmountedVolume) }
+            }
+        }
     }
 
     @objc private func workspaceDidActivateApplication(_ notification: Notification) {
@@ -302,7 +310,9 @@ final class NotchController: NSObject {
     }
 
     fileprivate func dispatchShortcut(_ event: NSEvent, editingText: Bool) -> Bool {
-        guard let command = shortcuts.command(for: event) else { return false }
+        guard let command = shortcuts.command(for: event) else {
+            return !editingText && handleGalleryArrow(event)
+        }
         if editingText && command != .close && command != .settings && command != .filter {
             let usesModifier = !event.modifierFlags.intersection([.command, .control]).isEmpty
             if !command.isTabCommand || !usesModifier { return false }
@@ -347,7 +357,13 @@ final class NotchController: NSObject {
             if panel?.isPreviewVisible == true { panel?.closePreview() }
             else { browser.showPreview(selection) }
         case .selectAll:
-            browser.selection = FileListing(browser: browser, settings: settings).visibleIDs
+            let listing = FileListing(browser: browser, settings: settings)
+            if listing.displayMode == .columns {
+                let column = browser.activeColumn
+                browser.selectColumnItems(Set(listing.entries(in: column).map(\.id)), in: column)
+            } else {
+                browser.selection = listing.visibleIDs
+            }
         case .copy: browser.copyItems(selection)
         case .paste: browser.pasteItems(cleanupInstaller: settings.cleansDiskImageAfterInstall)
         case .copyPath: browser.copyPaths(selection)
@@ -363,6 +379,20 @@ final class NotchController: NSObject {
         case .nextTab: tabs.cycle(forward: true)
         case .previousTab: tabs.cycle(forward: false)
         }
+        return true
+    }
+
+    private func handleGalleryArrow(_ event: NSEvent) -> Bool {
+        guard !tabs.showsClipboard, panel?.isPreviewVisible != true, !(panel?.firstResponder is NSSlider),
+              settings.displayMode(for: browser.destination) == .gallery,
+              event.modifierFlags.intersection([.command, .control, .shift, .option]).isEmpty,
+              event.keyCode == kVK_LeftArrow || event.keyCode == kVK_RightArrow else { return false }
+        let entries = FileListing(browser: browser, settings: settings).entries
+        guard !entries.isEmpty else { return false }
+        let current = entries.firstIndex { browser.selection.contains($0.id) }
+        let offset = event.keyCode == kVK_LeftArrow ? -1 : 1
+        let index = min(entries.count - 1, max(0, (current ?? 0) + offset))
+        browser.selection = [entries[index].id]
         return true
     }
 
@@ -512,6 +542,8 @@ private final class NotchPanel: NSPanel, @preconcurrency QLPreviewPanelDataSourc
     private weak var previewWindow: QLPreviewPanel?
     private var folderPreviewWindow: FolderPreviewPanel?
     private var previewKeyMonitor: Any?
+    private weak var fileDragTarget: FileTileDragTarget?
+    private var fileDragStart = NSPoint.zero
 
     var isPreviewVisible: Bool { previewWindow?.isVisible == true || folderPreviewWindow?.isVisible == true }
 
@@ -641,17 +673,44 @@ private final class NotchPanel: NSPanel, @preconcurrency QLPreviewPanelDataSourc
             onMouseDown?()
         }
         if event.type == .leftMouseDown {
+            fileDragTarget = interactionTarget(FileTileDragTarget.self, at: event.locationInWindow)
+            fileDragStart = event.locationInWindow
             focusForInteraction()
+            if let slider = firstResponder as? NSSlider,
+               !slider.bounds.contains(slider.convert(event.locationInWindow, from: nil)) {
+                makeFirstResponder(nil)
+            }
             if let table = table(at: event.locationInWindow) {
                 // Let the table process the same click that ends field editing.
                 if isEditingText { makeFirstResponder(table) }
                 let point = table.convert(event.locationInWindow, from: nil)
-                if !event.modifierFlags.contains(.control), isBlankTablePoint(point, in: table), onEmptyTableClick?() == true {
-                    return
+                if !event.modifierFlags.contains(.control), isBlankTablePoint(point, in: table) {
+                    if let target = interactionTarget(ColumnClickTarget.Target.self, at: event.locationInWindow) {
+                        target.clearSelection()
+                        return
+                    }
+                    if onEmptyTableClick?() == true { return }
                 }
             }
+        } else if event.type == .leftMouseDragged, let fileDragTarget,
+                  hypot(event.locationInWindow.x - fileDragStart.x, event.locationInWindow.y - fileDragStart.y) >= 4 {
+            self.fileDragTarget = nil
+            if fileDragTarget.beginDrag(with: event) { return }
+        } else if event.type == .leftMouseUp {
+            fileDragTarget = nil
         }
         super.sendEvent(event)
+    }
+
+    private func interactionTarget<T: NSView>(_ type: T.Type, at point: NSPoint) -> T? {
+        func find(in view: NSView) -> T? {
+            let localPoint = view.convert(point, from: nil)
+            guard !view.isHidden, view.visibleRect.contains(localPoint) else { return nil }
+            // SwiftUI's AppKit hosts can report a visible rect wider than the represented view.
+            if let target = view as? T, view.bounds.contains(localPoint) { return target }
+            return view.subviews.reversed().lazy.compactMap { find(in: $0) }.first
+        }
+        return contentView.flatMap { find(in: $0) }
     }
 
     private func isBlankTablePoint(_ point: NSPoint, in table: NSTableView) -> Bool {

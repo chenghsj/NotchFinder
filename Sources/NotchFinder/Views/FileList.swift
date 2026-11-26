@@ -29,8 +29,8 @@ struct FileList: View {
             .id(browser.destination)
             .onChange(of: settings.fileSort) { _, _ in browser.setTableSortOrder([], for: settings) }
             .onChange(of: browser.groupsFilesByAddedDate(for: settings)) { _, _ in browser.setTableSortOrder([], for: settings) }
-            .onChange(of: settings.displayMode) { _, mode in
-                if mode == .icons { browser.selection.formIntersection(listing.visibleIDs) }
+            .onChange(of: listing.displayMode) { _, _ in
+                browser.selection.formIntersection(listing.visibleIDs)
             }
             .onChange(of: browser.selection) { _, selection in
                 if !selection.isEmpty { releaseSearchFocus() }
@@ -42,48 +42,25 @@ struct FileList: View {
 
     @ViewBuilder
     private var contents: some View {
-        switch settings.displayMode {
-        case .details:
-            withFileActions(detailTable)
-        case .compact:
-            withFileActions(compactList)
+        switch listing.displayMode {
         case .icons:
-            FileIconGrid(browser: browser, entries: listing.entries, interfaceSize: settings.interfaceSize,
-                         fontDesign: settings.appearance.fontStyle.design, cleanupInstaller: settings.cleansDiskImageAfterInstall,
-                         releaseSearchFocus: releaseSearchFocus)
+            FileTiles(browser: browser, entries: listing.entries, settings: settings,
+                      layout: .grid, releaseSearchFocus: releaseSearchFocus)
+        case .list:
+            withFileActions(detailTable)
+        case .columns:
+            FileColumns(browser: browser, listing: listing, settings: settings)
+        case .gallery:
+            FileGallery(browser: browser, entries: listing.entries, settings: settings,
+                        releaseSearchFocus: releaseSearchFocus, onFileDragEnded: onFileDragEnded)
         }
-    }
-
-    private var compactList: some View {
-        let stripe = stripeColor
-        return List(selection: $browser.selection) {
-            if let groups = listing.groups {
-                ForEach(groups) { group in
-                    Section {
-                        ForEach(group.entries) { compactRow($0, stripe: stripe) }
-                    } header: {
-                        groupHeader(group.title)
-                    }
-                    .listSectionSeparator(.hidden)
-                }
-            } else {
-                ForEach(listing.entries) { compactRow($0) }
-            }
-        }
-        .listStyle(.inset)
-        .alternatingRowBackgrounds(listing.groups != nil && stripe == nil ? .enabled : .disabled)
-        .scrollContentBackground(.hidden)
-    }
-
-    private func compactRow(_ entry: FileEntry, stripe: NSColor? = nil) -> some View {
-        fileRow(entry, stripe: stripe)
-            .itemProvider { NSItemProvider(object: entry.url as NSURL) }
     }
 
     private func fileRow(_ entry: FileEntry, stripe: NSColor? = nil, fillsTableWidth: Bool = false) -> some View {
         let depth = browser.showsRecentItems ? 0 : max(0, entry.url.pathComponents.count - browser.directory.pathComponents.count - 1)
         return FileRow(entry: entry, depth: depth, interfaceSize: settings.interfaceSize,
-                       loadsFileIcon: browser.fileIconsEnabled, fontDesign: settings.appearance.fontStyle.design, expanded: browser.expandedFolders[entry.url] != nil,
+                       loadsFileIcon: browser.fileIconsEnabled, fontDesign: settings.appearance.fontStyle.design,
+                       expanded: browser.isExpandedInList(entry.url),
                        toggleExpansion: { browser.toggleExpansion(of: entry) })
             .background {
                 if let stripe { NativeFileRowBackground(stripe: stripe) }
@@ -104,6 +81,8 @@ struct FileList: View {
     private var detailTable: some View {
         let grouped = listing.groups != nil
         let stripe = stripeColor
+        let filtersLargeFolder = browser.entries.count >= 10_000 &&
+            !browser.filter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let date: (title: String, key: KeyPath<FileEntry, Date>, showsTime: Bool) = if browser.showsRecentItems {
             (L10n.text("上次使用日期"), \.lastUsed, true)
         } else if grouped {
@@ -152,6 +131,8 @@ struct FileList: View {
         }
         .alternatingRowBackgrounds(grouped && stripe == nil ? .enabled : .disabled)
         .scrollContentBackground(.hidden)
+        // Recreate the outline when a large filter starts or clears to avoid diffing thousands of rows.
+        .id(filtersLargeFolder)
         if grouped {
             table.tableStyle(.inset)
         } else {
@@ -345,13 +326,14 @@ struct BrowserFileIcon: View {
     let entry: FileEntry
     let side: CGFloat
     let loadsFileIcon: Bool
+    var thumbnail: NSImage? = nil
     @Environment(\.quickLookSources) private var quickLookSources
     @State private var fileIcon: NSImage?
 
     var body: some View {
         Group {
-            if let fileIcon {
-                Image(nsImage: fileIcon)
+            if let image = thumbnail ?? fileIcon {
+                Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
             } else {

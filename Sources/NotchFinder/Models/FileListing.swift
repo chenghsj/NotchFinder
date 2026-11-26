@@ -1,11 +1,20 @@
 import Foundation
 
 struct FileListing {
+    struct Column: Identifiable {
+        let id: URL?
+        let entries: [FileEntry]
+        let isLoading: Bool
+    }
+
+    let displayMode: FileDisplayMode
     let entries: [FileEntry]
     let groups: [FileDateGroup]?
+    let columns: [Column]
 
     @MainActor
     init(browser: FileBrowser, settings: NotchSettings) {
+        displayMode = settings.displayMode(for: browser.destination)
         let sortOrder = browser.tableSortOrder(for: settings)
         let preferred = settings.fileSort
         let foldersFirst = settings.foldersFirst
@@ -41,23 +50,39 @@ struct FileListing {
         }
 
         let roots = ordered(browser.displayedEntries)
-        if settings.displayMode == .icons {
+        switch displayMode {
+        case .icons, .gallery:
+            columns = []
             groups = nil
             entries = roots
-        } else if browser.groupsFilesByAddedDate(for: settings) {
-            let dateGroups = FileDateGroup.byDateAdded(roots).map { group in
-                FileDateGroup(title: group.title,
-                              entries: browser.listedEntries(from: group.entries, orderChildren: ordered))
+        case .columns:
+            columns = [Column(id: nil, entries: roots, isLoading: browser.isLoading)] + browser.columnPath.map { folder in
+                Column(id: folder, entries: ordered(browser.expandedFolders[folder] ?? []),
+                       isLoading: browser.isLoadingContents(of: folder))
             }
-            groups = dateGroups
-            entries = dateGroups.flatMap(\.entries)
-        } else {
             groups = nil
-            entries = browser.listedEntries(from: roots, orderChildren: ordered)
+            entries = columns.flatMap(\.entries)
+        case .list:
+            columns = []
+            if browser.groupsFilesByAddedDate(for: settings) {
+                let dateGroups = FileDateGroup.byDateAdded(roots).map { group in
+                    FileDateGroup(title: group.title,
+                                  entries: browser.listedEntries(from: group.entries, orderChildren: ordered))
+                }
+                groups = dateGroups
+                entries = dateGroups.flatMap(\.entries)
+            } else {
+                groups = nil
+                entries = browser.listedEntries(from: roots, orderChildren: ordered)
+            }
         }
     }
 
     var visibleIDs: Set<URL> { Set(entries.map(\.url)) }
+
+    func entries(in column: URL?) -> [FileEntry] {
+        columns.first { $0.id == column }?.entries ?? []
+    }
 
     func selected(_ ids: Set<URL>) -> [FileEntry] {
         guard !ids.isEmpty else { return [] }

@@ -41,6 +41,7 @@ final class SidebarLocations {
     private struct MountedLocation {
         let kind: SidebarVolumeKind
         let location: BrowserLocation
+        let canEject: Bool
     }
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -48,6 +49,7 @@ final class SidebarLocations {
     private let optionalFavoritePaths: Set<String>
     private let standardLocations: [BrowserLocation]
     private var mounts: [MountedLocation] = []
+    private(set) var isEjectingVolume = false
     private var favorites: [URL]
     private var order: [String]
     private var hidden: Set<String>
@@ -61,9 +63,9 @@ final class SidebarLocations {
         let manager = FileManager.default
         let home = manager.homeDirectoryForCurrentUser.standardizedFileURL
         let userFolders: [(FileManager.SearchPathDirectory, String, String, Bool)] = [
-            (.desktopDirectory, "桌面", "desktopcomputer", true),
-            (.documentDirectory, "文件", "doc.text", true),
-            (.downloadsDirectory, "下載項目", "arrow.down.to.line", true),
+            (.desktopDirectory, "桌面", "menubar.dock.rectangle", true),
+            (.documentDirectory, "文件", "doc", true),
+            (.downloadsDirectory, "下載項目", "arrow.down.circle", true),
             (.moviesDirectory, "影片", "film", false),
             (.musicDirectory, "音樂", "music.note", false),
             (.picturesDirectory, "圖片", "photo", false)
@@ -128,17 +130,43 @@ final class SidebarLocations {
     }
 
     func refreshVolumes() {
-        let keys: [URLResourceKey] = [.volumeLocalizedNameKey, .volumeIsInternalKey, .volumeIsLocalKey]
-        let volumes = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? []
+        let keys: Set<URLResourceKey> = [
+            .volumeLocalizedNameKey, .volumeIsInternalKey, .volumeIsLocalKey,
+            .volumeIsRemovableKey, .volumeIsEjectableKey
+        ]
+        let volumes = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: Array(keys), options: [.skipHiddenVolumes]) ?? []
         mounts = volumes.map { url in
-            let values = try? url.resourceValues(forKeys: Set(keys))
+            let values = try? url.resourceValues(forKeys: keys)
             let kind: SidebarVolumeKind
             if values?.volumeIsLocal == false { kind = .servers }
             else { kind = values?.volumeIsInternal == true || url.path == "/" ? .internalDisks : .externalDisks }
             let title = values?.volumeLocalizedName.map(BrowserLocation.Title.literal)
                 ?? (url.path == "/" ? .localized("根目錄") : .literal(url.lastPathComponent))
-            return MountedLocation(kind: kind, location: BrowserLocation(title: title, symbol: kind.symbol, url: url.standardizedFileURL))
+            let location = BrowserLocation(title: title, symbol: kind.symbol, url: url.standardizedFileURL)
+            // USB drives can report fixed media even though the entire device can be disconnected.
+            let canEject = url.path != "/" && (values?.volumeIsInternal == false || values?.volumeIsLocal == false
+                || values?.volumeIsRemovable == true || values?.volumeIsEjectable == true)
+            return MountedLocation(kind: kind, location: location, canEject: canEject)
         }
+    }
+
+    func canEject(_ location: BrowserLocation) -> Bool {
+        mounts.contains { $0.canEject && $0.location.id == location.id }
+    }
+
+    func eject(_ location: BrowserLocation) async throws {
+        guard !isEjectingVolume, canEject(location) else { return }
+        isEjectingVolume = true
+        defer {
+            refreshVolumes()
+            isEjectingVolume = false
+        }
+        let volume = location.url
+        try await Task.detached(priority: .userInitiated) {
+            if try !DiskImageInstall.ejectMountedImage(at: volume) {
+                try NSWorkspace.shared.unmountAndEjectDevice(at: volume)
+            }
+        }.value
     }
 
     func isVisible(_ location: BrowserLocation) -> Bool {

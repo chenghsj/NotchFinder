@@ -1,9 +1,8 @@
 import Foundation
 
 enum DiskImageInstall {
-    struct Image: Equatable {
+    struct Image {
         let file: URL
-        let volume: URL
         let device: String?
     }
 
@@ -96,17 +95,27 @@ enum DiskImageInstall {
         }
     }
 
-    static func mountedImage(at volume: URL, in data: Data) throws -> Image? {
+    static func ejectMountedImage(at volume: URL) throws -> Bool {
+        guard let data = try? imageInfo(),
+              let image = try? mountedImage(at: volume, in: data, dmgOnly: false),
+              let device = image.device else { return false }
+        // Eject the backing device so APFS disk images detach along with their mounted volumes.
+        _ = try runDiskCommand("/usr/sbin/diskutil", ["eject", device],
+                               failure: L10n.text("磁碟可能正在使用中。請關閉磁碟上的檔案或 App 後再試一次。"))
+        return true
+    }
+
+    static func mountedImage(at volume: URL, in data: Data, dmgOnly: Bool = true) throws -> Image? {
         let info = try PropertyListDecoder().decode(ImageInfo.self, from: data)
         let expectedVolume = volume.resolvingSymlinksInPath().path
         return info.images.lazy.compactMap { image -> Image? in
             guard let path = image.path, path.hasPrefix("/"),
-                  URL(fileURLWithPath: path).pathExtension.lowercased() == "dmg",
+                  !dmgOnly || URL(fileURLWithPath: path).pathExtension.lowercased() == "dmg",
                   image.entities?.contains(where: { entity in
                       guard let mount = entity.mountPoint else { return false }
                       return URL(fileURLWithPath: mount).resolvingSymlinksInPath().path == expectedVolume
                   }) == true else { return nil }
-            return Image(file: URL(fileURLWithPath: path).standardizedFileURL, volume: volume, device: image.backingDevice)
+            return Image(file: URL(fileURLWithPath: path).standardizedFileURL, device: image.backingDevice)
         }.first
     }
 

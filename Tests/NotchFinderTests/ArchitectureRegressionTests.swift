@@ -181,7 +181,66 @@ struct ArchitectureRegressionTests {
         #expect(tabB.browser.entries.count == 2)
         tabs.select(tabA.id)
         #expect(!tabs.showsClipboard)
+        #expect(!tabA.browser.isLoading)
+        tabs.select(tabB.id)
+        try await waitUntil { tabB.browser.entries.count == 3 }
+        #expect(tabA.browser.entries.isEmpty)
+
+        tabs.select(tabA.id)
         try await waitUntil { tabA.browser.entries.map(\.url.lastPathComponent) == ["inactive.txt"] }
+    }
+
+    @Test func folderReadPreservesSystemDisplayNamesAndRawFilenameSearch() async throws {
+        let fixture = try TestWorkspace()
+        defer { fixture.cleanUp() }
+        let folder = try fixture.createFolder("Names")
+        for name in ["plain.txt", "résumé.txt", "Icon\r", ".dotfile"] {
+            try Data().write(to: folder.appending(path: name))
+        }
+        var hiddenExtension = folder.appending(path: "hidden-extension.txt")
+        try Data().write(to: hiddenExtension)
+        var properties = URLResourceValues()
+        properties.hasHiddenExtension = true
+        try hiddenExtension.setResourceValues(properties)
+        let localized = folder.appending(path: "Sample.localized", directoryHint: .isDirectory)
+        let translations = localized.appending(path: ".localized", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: translations, withIntermediateDirectories: true)
+        try Data(#""Sample" = "Translated";"#.utf8).write(to: translations.appending(path: "en.strings"))
+        try FileManager.default.createSymbolicLink(at: folder.appending(path: "Folder Link"), withDestinationURL: localized)
+
+        let browser = FileBrowser(initialDirectory: folder, defaults: fixture.defaults)
+        browser.reload()
+        try await waitUntil { !browser.isLoading }
+        #expect(browser.entries.count == 6)
+        for entry in browser.entries {
+            let expected = try entry.url.resourceValues(forKeys: [.localizedNameKey]).localizedName
+            #expect(entry.name == (expected ?? entry.url.lastPathComponent))
+        }
+        browser.filter = "hidden-extension.txt"
+        #expect(browser.displayedEntries.map(\.url.lastPathComponent) == ["hidden-extension.txt"])
+        let includingHidden = try await FileBrowser.readContents(of: folder, includeHidden: true)
+        #expect(includingHidden.contains { $0.url.lastPathComponent == ".dotfile" })
+    }
+
+    @Test func ejectingAVolumeClearsItsNavigationWithoutAffectingASimilarlyNamedVolume() throws {
+        let fixture = try TestWorkspace()
+        defer { fixture.cleanUp() }
+        let disk = try fixture.createFolder("Disk")
+        let otherDisk = try fixture.createFolder("Disk 1")
+        let child = disk.appending(path: "Files", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: false)
+        let browser = FileBrowser(initialDirectory: child, defaults: fixture.defaults)
+
+        browser.navigate(to: otherDisk)
+        browser.volumeDidUnmount(at: disk)
+        #expect(browser.directory == otherDisk)
+        #expect(!browser.canGoBack)
+
+        browser.navigate(to: child)
+        browser.volumeDidUnmount(at: disk)
+        #expect(browser.directory == FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL)
+        browser.goBack()
+        #expect(browser.directory == otherDisk)
     }
 
     @Test func listingSelectionUsesVisibleSortedRows() async throws {
@@ -212,19 +271,131 @@ struct ArchitectureRegressionTests {
         #expect(detailed.groups == nil)
         #expect(detailed.selected(detailed.visibleIDs) == detailed.entries)
 
-        settings.displayMode = .compact
-        #expect(FileListing(browser: browser, settings: settings).entries == detailed.entries)
-        settings.displayMode = .icons
+        settings.setDisplayMode(.icons, for: browser.destination)
         let grid = FileListing(browser: browser, settings: settings)
         #expect(grid.entries.map(\.url.lastPathComponent) == ["Folder", "Z-root.txt", "A-root.txt"])
         #expect(grid.selected(detailed.visibleIDs) == grid.entries)
+        settings.setDisplayMode(.gallery, for: browser.destination)
+        #expect(FileListing(browser: browser, settings: settings).entries == grid.entries)
 
         browser.filter = "A-root"
-        let filteredGrid = FileListing(browser: browser, settings: settings)
-        #expect(filteredGrid.selected(detailed.visibleIDs).map(\.url.lastPathComponent) == ["A-root.txt"])
+        let filteredGallery = FileListing(browser: browser, settings: settings)
+        #expect(filteredGallery.selected(detailed.visibleIDs).map(\.url.lastPathComponent) == ["A-root.txt"])
     }
 
-    @Test func downloadsAndTrashListsShareDateGrouping() throws {
+    @Test func legacyListPreferencesAndNewDisplayModes() throws {
+        let fixture = try TestWorkspace()
+        defer { fixture.cleanUp() }
+        for oldMode in ["details", "compact"] {
+            fixture.defaults.set(oldMode, forKey: "fileDisplayMode")
+            #expect(NotchSettings(defaults: fixture.defaults).defaultDisplayMode == .list)
+        }
+        let settings = NotchSettings(defaults: fixture.defaults)
+        #expect(FileDisplayMode.allCases == [.icons, .list, .columns, .gallery])
+        for mode in FileDisplayMode.allCases {
+            settings.defaultDisplayMode = mode
+            #expect(NotchSettings(defaults: fixture.defaults).defaultDisplayMode == mode)
+        }
+    }
+
+    @Test func locationsRememberTheirViewsAcrossTabsAndSettingsReload() throws {
+        let fixture = try TestWorkspace()
+        defer { fixture.cleanUp() }
+        fixture.defaults.set("details", forKey: "fileDisplayMode")
+        let settings = NotchSettings(defaults: fixture.defaults)
+        let firstFolder = try fixture.createFolder("First")
+        let secondFolder = try fixture.createFolder("Second")
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let history = ClipboardHistory(pasteboard: board, defaults: fixture.defaults,
+                                       storageURL: fixture.directory.appending(path: "history.plist"))
+        let tabs = BrowserTabs(initialDirectory: firstFolder, defaults: fixture.defaults, clipboardHistory: history)
+        let firstTab = tabs.active
+        let trash = try #require(firstTab.browser.sidebar.locationItems.first(where: { $0.symbol == "trash" })?.url)
+
+        func modeInActiveTab() -> FileDisplayMode {
+            FileListing(browser: tabs.active.browser, settings: settings).displayMode
+        }
+
+        #expect(modeInActiveTab() == .list)
+        settings.setDisplayMode(.list, for: firstTab.browser.destination)
+        tabs.add()
+        let secondTab = tabs.active
+        tabs.navigate(to: secondFolder)
+        #expect(modeInActiveTab() == .list)
+        settings.setDisplayMode(.gallery, for: secondTab.browser.destination)
+        tabs.showRecentItems()
+        #expect(modeInActiveTab() == .list)
+        settings.setDisplayMode(.columns, for: secondTab.browser.destination)
+        tabs.navigate(to: trash)
+        #expect(modeInActiveTab() == .list)
+        settings.setDisplayMode(.icons, for: secondTab.browser.destination)
+
+        tabs.select(firstTab.id)
+        #expect(modeInActiveTab() == .list)
+        tabs.navigate(to: secondFolder)
+        #expect(modeInActiveTab() == .gallery)
+        tabs.select(secondTab.id)
+        #expect(modeInActiveTab() == .icons)
+        secondTab.browser.goBack()
+        #expect(modeInActiveTab() == .columns)
+        secondTab.browser.goBack()
+        #expect(modeInActiveTab() == .gallery)
+        tabs.goForward()
+        #expect(modeInActiveTab() == .columns)
+        #expect(settings.defaultDisplayMode == .list)
+
+        settings.defaultDisplayMode = .gallery
+        let reloaded = NotchSettings(defaults: fixture.defaults)
+        #expect(reloaded.displayMode(for: .folder(firstFolder)) == .list)
+        #expect(reloaded.displayMode(for: .folder(secondFolder)) == .gallery)
+        #expect(reloaded.displayMode(for: .recentItems) == .columns)
+        #expect(reloaded.displayMode(for: .folder(trash)) == .icons)
+        #expect(reloaded.displayMode(for: .folder(fixture.directory)) == .gallery)
+    }
+
+    @Test func columnsFollowSelectionAndPreserveInlineExpansion() async throws {
+        let fixture = try TestWorkspace()
+        defer { fixture.cleanUp() }
+        let firstFolder = try fixture.createFolder("First")
+        _ = try fixture.createFolder("Second")
+        let nestedFolder = firstFolder.appending(path: "Nested", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: nestedFolder, withIntermediateDirectories: false)
+        try Data().write(to: nestedFolder.appending(path: "Leaf.txt"))
+
+        let browser = FileBrowser(initialDirectory: fixture.directory, defaults: fixture.defaults)
+        let settings = NotchSettings(defaults: fixture.defaults)
+        browser.reload()
+        try await waitUntil { browser.entries.count == 2 }
+        let first = try #require(browser.entries.first { $0.url.lastPathComponent == "First" }).id
+        let second = try #require(browser.entries.first { $0.url.lastPathComponent == "Second" })
+        browser.toggleExpansion(of: second)
+        settings.setDisplayMode(.columns, for: browser.destination)
+        browser.selectColumnItems([first], in: nil)
+        try await waitUntil { !FileListing(browser: browser, settings: settings).entries(in: first).isEmpty }
+        let nested = try #require(FileListing(browser: browser, settings: settings).entries(in: first).first).id
+        #expect(nested.lastPathComponent == "Nested")
+        browser.selectColumnItems([nested], in: first)
+        try await waitUntil { !FileListing(browser: browser, settings: settings).entries(in: nested).isEmpty }
+        let leaf = try #require(FileListing(browser: browser, settings: settings).entries(in: nested).first).id
+        #expect(leaf.lastPathComponent == "Leaf.txt")
+        browser.selectColumnItems([leaf], in: nested)
+        let listing = FileListing(browser: browser, settings: settings)
+        #expect(listing.columns.map(\.id) == [nil, first, nested])
+        #expect(listing.selected(browser.selection).map(\.id) == [leaf])
+        #expect(browser.entries(matching: browser.selection).map(\.id) == [leaf])
+        #expect(browser.activeColumn == nested)
+        #expect(!browser.isExpandedInList(first))
+
+        browser.filter = "Second"
+        #expect(browser.columnPath.isEmpty)
+        #expect(browser.activeColumn == nil)
+        #expect(browser.selection.isEmpty)
+        #expect(browser.isExpandedInList(second.id))
+        #expect(FileListing(browser: browser, settings: settings).entries.map(\.id) == [second.id])
+    }
+
+    @Test func downloadsAndTrashGroupOnlyInListView() throws {
         let fixture = try TestWorkspace()
         defer { fixture.cleanUp() }
         let settings = NotchSettings(defaults: fixture.defaults)
@@ -239,21 +410,23 @@ struct ArchitectureRegressionTests {
             FileBrowser(initialDirectory: try fixture.createFolder($0), defaults: fixture.defaults)
         }
 
-        for mode in [FileDisplayMode.details, .compact] {
-            settings.displayMode = mode
+        for browser in destinations {
+            #expect(FileListing(browser: browser, settings: settings).groups != nil)
+        }
+        for browser in children + namesakes {
+            #expect(FileListing(browser: browser, settings: settings).groups == nil)
+        }
+
+        for mode in [FileDisplayMode.icons, .columns, .gallery] {
             for browser in destinations {
-                #expect(FileListing(browser: browser, settings: settings).groups != nil)
-            }
-            for browser in children + namesakes {
+                settings.setDisplayMode(mode, for: browser.destination)
                 #expect(FileListing(browser: browser, settings: settings).groups == nil)
             }
         }
-
-        settings.displayMode = .icons
         for browser in destinations {
-            #expect(FileListing(browser: browser, settings: settings).groups == nil)
+            settings.setDisplayMode(.list, for: browser.destination)
+            #expect(FileListing(browser: browser, settings: settings).groups != nil)
         }
-        settings.displayMode = .details
         settings.groupsByAddedDate = false
         for browser in destinations {
             #expect(FileListing(browser: browser, settings: settings).groups == nil)

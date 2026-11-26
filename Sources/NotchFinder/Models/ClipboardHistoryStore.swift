@@ -1,10 +1,17 @@
 import Foundation
 
 struct ClipboardHistoryStore: Sendable {
-    static let defaultURL = URL.applicationSupportDirectory
-        .appending(path: "Notch Finder", directoryHint: .isDirectory)
-        .appending(path: "Clipboard History", directoryHint: .isDirectory)
-        .appending(path: "History.plist", directoryHint: .notDirectory)
+    static let defaultURL: URL = {
+        let directory: URL
+        if let testDirectory = ProcessInfo.processInfo.environment["NOTCH_FINDER_TEST_DATA_DIR"] {
+            directory = URL(filePath: testDirectory, directoryHint: .isDirectory)
+        } else {
+            directory = URL.applicationSupportDirectory
+                .appending(path: "Notch Finder", directoryHint: .isDirectory)
+                .appending(path: "Clipboard History", directoryHint: .isDirectory)
+        }
+        return directory.appending(path: "History.plist", directoryHint: .notDirectory)
+    }()
 
     static let maxEntries = 30
     static let maxPayloadBytes = 32 * 1024 * 1024

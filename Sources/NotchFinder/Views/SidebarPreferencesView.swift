@@ -62,8 +62,13 @@ struct SidebarPreferencesView: View {
 struct SidebarLocationIcon: View {
     private static let applicationsImage: NSImage? = {
         let coreTypes = Bundle(path: "/System/Library/CoreServices/CoreTypes.bundle")
-        return coreTypes?.url(forResource: "SidebarApplicationsFolder", withExtension: "icns")
-            .flatMap { NSImage(contentsOf: $0) }
+        guard let url = coreTypes?.url(forResource: "SidebarApplicationsFolder", withExtension: "icns"),
+              let image = NSImage(contentsOf: url) else { return nil }
+        // The 18-pixel representation can render distorted when drawn as a template.
+        let bitmap = image.representations.compactMap { $0 as? NSBitmapImageRep }
+            .max { $0.pixelsWide < $1.pixelsWide }
+        guard let bitmap, let cgImage = bitmap.cgImage else { return image }
+        return NSImage(cgImage: cgImage, size: bitmap.size)
     }()
 
     let location: BrowserLocation

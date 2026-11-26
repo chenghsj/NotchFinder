@@ -10,14 +10,14 @@ Requires macOS 14 Sonoma or later. A notch is optional. The interface is availab
 
 The prebuilt DMG requires an Apple Silicon Mac running macOS 14 Sonoma or later.
 
-Download the `.dmg` from **Assets**, then open it in Finder. [GitHub Releases](https://github.com/chenghsj/NotchFinder/releases)
+Download the `.dmg` from **Assets**, then open it in Finder. [Latest release](https://github.com/chenghsj/NotchFinder/releases/latest)
 
-To download and open the `v0.1.1` DMG from Terminal, run the following.
+To download and open the `v0.1.2` DMG from Terminal, run the following.
 
 ```sh
-dmg="$HOME/Downloads/NotchFinder-0.1.1-arm64.dmg"
+dmg="$HOME/Downloads/NotchFinder-0.1.2-arm64.dmg"
 curl -fL -o "$dmg" \
-  "https://github.com/chenghsj/NotchFinder/releases/download/v0.1.1/NotchFinder-0.1.1-arm64.dmg" &&
+  "https://github.com/chenghsj/NotchFinder/releases/download/v0.1.2/NotchFinder-0.1.2-arm64.dmg" &&
   open "$dmg"
 ```
 
@@ -26,14 +26,18 @@ curl -fL -o "$dmg" \
 
 ### Open for the first time
 
-The preview uses an ad hoc signature. If macOS displays a verification warning, confirm that the DMG came from this project's GitHub Releases before proceeding.
+The app uses an ad hoc signature. If macOS displays a verification warning, confirm that the DMG came from this project's GitHub Releases before proceeding.
 
 1. After trying to open Notch Finder, go to **System Settings → Privacy & Security**.
 2. Scroll to **Security**, choose **Open Anyway**, and confirm when prompted. [Apple's instructions](https://support.apple.com/en-us/102445)
 
+### Software updates
+
+When upgrading from v0.1.1 or earlier, install the DMG manually once to get in-app updates. In **Settings → General → Software Updates**, enable automatic checking and downloading, then enable **Automatically Install Updates** to install a verified update the next time you quit Notch Finder. With automatic installation turned off, automatic downloads go to Downloads.
+
 ## Features
 
-- Browse folders in tabs, each with its own back and forward history. Switch between Detailed List, Compact List, and Icon View. Expand folders in place in list views, or jump to a parent folder using the path bar.
+- Browse folders in tabs, each with its own back and forward history. Switch between Icon, List, Column, and Gallery views. Expand folders inline in List view, select a folder to browse its contents in the next column, or select a thumbnail to preview a file in Gallery.
 - Open Recents, Downloads, iCloud Drive, and mounted drives from the sidebar. Drag a folder into Favorites to keep it handy.
 - Preview files and folder contents with Quick Look. Drag files into other apps or use the context menu to copy, rename, or move them to Trash.
 - Search and preview text, images, and files from the clipboard. Copy items back to the clipboard, paste text or images into the previous app, or paste files into the current folder.
@@ -50,6 +54,20 @@ Building requires a Swift 6 toolchain and the macOS 27 SDK or later. Use an Xcod
 
 The script builds, signs, and opens `dist/NotchFinder.app`. Run `./script/build_and_run.sh --build` to build the app bundle without opening it.
 
+To package the app in the drag-to-Applications DMG, run these commands from the repository root with `uv` installed.
+
+```sh
+NOTCH_FINDER_BUILD_CONFIGURATION=release ./script/build_and_run.sh --build
+uvx --from dmgbuild==1.6.7 dmgbuild -s script/dmg_settings.py \
+  -D app=dist/NotchFinder.app "Notch Finder" dist/NotchFinder-preview.dmg
+```
+
+### Prepare a signed update
+
+1. Build the app with its release version and a build number higher than the last published build. Set `NOTCH_FINDER_VERSION` and `NOTCH_FINDER_BUILD_NUMBER` in the environment when running `./script/build_and_run.sh --build`. Name the packaged DMG `NotchFinder-VERSION-arm64.dmg` for an Apple Silicon build.
+2. From the release maintainer's Mac, run `SPARKLE_BIN_DIR=/path/to/sparkle/bin bash script/sign_preview_update.sh dist/NotchFinder-VERSION-arm64.dmg`. Use the signing tools from the pinned Sparkle release. The script uses the `local.notchfinder.preview` key in the login Keychain and produces the detached DMG signature and the signed `updates/preview.xml` feed.
+3. Publish the DMG and its `.sig` file together in the matching GitHub Release. Once both assets are publicly available, publish the generated `updates/preview.xml` on `main`.
+
 ## Usage
 
 1. Hover just below the notch to open the panel. If none of your displays has a notch, hover at the top center of the main display. You can also press `⌃⌥N` or choose **Show File Panel** from the menu bar icon.
@@ -57,6 +75,8 @@ The script builds, signs, and opens `dist/NotchFinder.app`. Run `./script/build_
 3. Move the pointer away to let the panel close, or click the pin in the toolbar to keep it open.
 
 Use **Settings → General → Interface Language** to change Notch Finder’s language. Changes take effect immediately. The default follows macOS’s language preference for the app.
+
+To quit Notch Finder, choose **Quit Notch Finder** from **Settings → General** or from the menu bar icon.
 
 ### Keyboard shortcuts
 
@@ -88,5 +108,11 @@ swift test
 ```
 
 The build script uses the Apple Development identity in your keychain if there is exactly one available. It otherwise signs the bundle ad hoc. Set `NOTCH_FINDER_SIGNING_IDENTITY` to use a specific identity across rebuilds.
+
+For interactive UI testing, run `./script/build_and_run.sh --test` and press Enter in the terminal when finished. Add `--settings` to start in Settings. For automated checks, pass the check command after `--`. It receives `NOTCH_FINDER_TEST_APP_PID` and `NOTCH_FINDER_TEST_APP_BUNDLE` in its environment. The test copy quits when the check command exits or the session is interrupted.
+
+Run `./script/build_and_run.sh --verify` to check that a test copy launches and then close it automatically.
+
+Test copies skip the menu bar icon so macOS does not keep an entry for each temporary app in System Settings.
 
 See the [feature specification and manual testing checklist](docs/notch-finder-spec.md) (Traditional Chinese).

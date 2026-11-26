@@ -6,7 +6,7 @@ private extension PreferencesPage {
     var title: String {
         switch self {
         case .triggers: L10n.text("一般")
-        case .appearance: L10n.text("外觀與尺寸")
+        case .appearance: L10n.text("外觀")
         case .sidebar: L10n.text("側邊欄")
         case .browsing: L10n.text("檔案瀏覽")
         case .clipboard: L10n.text("剪貼簿")
@@ -30,12 +30,17 @@ private extension PreferencesPage {
 
 struct PreferencesView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @FocusState private var sidebarFocused: Bool
+    @State private var sidebarWidth: CGFloat = 216
+    @GestureState private var sidebarDragOffset: CGFloat = 0
     @Bindable var settings: NotchSettings
     @Bindable var shortcuts: PanelShortcuts
     let tabs: BrowserTabs
     @Bindable var clipboardHistory: ClipboardHistory
     var restoreSize: () -> Void
     var saveSize: () -> Void
+
+    private let sidebarDividerWidth: CGFloat = 7
 
     private var selection: Binding<PreferencesPage?> {
         Binding(
@@ -46,26 +51,14 @@ struct PreferencesView: View {
 
     var body: some View {
         let preset = settings.appearance.preset(for: colorScheme)
+        let accent = settings.appearance.accentColor(for: colorScheme)
         let size = settings.interfaceSize
         let scale = size.preferencesScale
-        NavigationSplitView {
-            List(selection: selection) {
-                ForEach(PreferencesPage.allCases, id: \.self) { page in
-                    Label {
-                        Text(page.title)
-                            .font(settings.panelFont(size: size.panelText))
-                    } icon: {
-                        Image(systemName: page.symbol)
-                            .font(.system(size: size.panelIcon))
-                            .frame(width: 22 * scale)
-                    }
-                    .frame(minHeight: 23 * scale)
-                    .tag(page)
-                }
-            }
-            .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(176 * scale)
-        } detail: {
+        let width = clampedSidebarWidth(sidebarWidth + sidebarDragOffset / scale) * scale
+        HStack(spacing: 0) {
+            sidebar(size: size, preset: preset, accent: accent)
+                .frame(width: width)
+
             let page = settings.preferencesPage
             VStack(alignment: .leading, spacing: 0) {
                 Text(page.title)
@@ -90,10 +83,137 @@ struct PreferencesView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(preset.windowColor)
         }
-        .navigationSplitViewStyle(.balanced)
-        .accentColor(settings.appearance.accentColor(for: colorScheme))
-        .tint(settings.appearance.accentColor(for: colorScheme))
+        .overlay(alignment: .leading) {
+            sidebarDivider(width: width, scale: scale, accent: accent)
+                .offset(x: width - sidebarDividerWidth / 2)
+        }
+        .accentColor(accent)
+        .tint(accent)
         .font(settings.panelFont(size: settings.interfaceSize.panelText))
+    }
+
+    @ViewBuilder
+    private func sidebar(size: FileDisplaySize, preset: PanelStylePreset, accent: Color?) -> some View {
+        let scale = size.preferencesScale
+        if let accent {
+            let cornerRadius: CGFloat = 8
+            ScrollViewReader { scroll in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(PreferencesPage.allCases, id: \.self) { page in
+                            let selected = page == settings.preferencesPage
+                            Button {
+                                settings.preferencesPage = page
+                                sidebarFocused = true
+                            } label: {
+                                sidebarLabel(page, size: size, selected: selected, accent: accent)
+                                    .frame(maxWidth: .infinity, minHeight: 33 * scale, alignment: .leading)
+                                    .padding(.horizontal, 8 * scale)
+                            }
+                            .buttonStyle(PanelButtonStyle(selected: selected, cornerRadius: cornerRadius, accent: accent))
+                            .overlay {
+                                if selected && sidebarFocused {
+                                    RoundedRectangle(cornerRadius: cornerRadius)
+                                        .strokeBorder(accent)
+                                        .allowsHitTesting(false)
+                                        .accessibilityHidden(true)
+                                }
+                            }
+                            .accessibilityAddTraits(selected ? .isSelected : [])
+                            .id(page)
+                        }
+                    }
+                    .padding(.horizontal, 10 * scale)
+                    .padding(.vertical, 9 * scale)
+                }
+                .focusable()
+                .focused($sidebarFocused)
+                .focusEffectDisabled()
+                .onMoveCommand { direction in
+                    let pages = PreferencesPage.allCases
+                    guard let index = pages.firstIndex(of: settings.preferencesPage) else { return }
+                    let next: Int
+                    switch direction {
+                    case .up: next = index - 1
+                    case .down: next = index + 1
+                    default: return
+                    }
+                    guard pages.indices.contains(next) else { return }
+                    settings.preferencesPage = pages[next]
+                    scroll.scrollTo(pages[next])
+                }
+            }
+            .background(preset.windowColor)
+            .accessibilityLabel(L10n.text("側邊欄"))
+        } else {
+            List(selection: selection) {
+                ForEach(PreferencesPage.allCases, id: \.self) { page in
+                    sidebarLabel(page, size: size)
+                        .frame(minHeight: 23 * scale)
+                        .tag(page)
+                }
+            }
+            .listStyle(.sidebar)
+        }
+    }
+
+    private func sidebarLabel(_ page: PreferencesPage, size: FileDisplaySize,
+                              selected: Bool = false, accent: Color? = nil) -> some View {
+        Label {
+            Text(page.title)
+                .font(settings.panelFont(size: size.panelText, weight: selected ? .semibold : .regular))
+                .lineLimit(1)
+        } icon: {
+            let symbol = Image(systemName: page.symbol)
+            Group {
+                if let accent { symbol.foregroundStyle(accent) }
+                else { symbol }
+            }
+            .font(.system(size: size.panelIcon))
+            .frame(width: 22 * size.preferencesScale)
+        }
+    }
+
+    private func sidebarDivider(width: CGFloat, scale: CGFloat, accent: Color?) -> some View {
+        let divider = Rectangle()
+            .fill(accent?.opacity(0.3) ?? Color(nsColor: .separatorColor))
+            .frame(width: 1)
+            .frame(width: sidebarDividerWidth)
+            .contentShape(.rect)
+
+        return sidebarResizePointer(divider)
+            .gesture(
+                DragGesture(minimumDistance: 2, coordinateSpace: .global)
+                    .updating($sidebarDragOffset) { drag, offset, _ in offset = drag.translation.width }
+                    .onEnded { drag in
+                        sidebarWidth = clampedSidebarWidth(sidebarWidth + drag.translation.width / scale)
+                    }
+            )
+            .accessibilityLabel(L10n.text("側邊欄寬度"))
+            .accessibilityValue(L10n.text("%@ 點", String(describing: Int(width.rounded()))))
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: sidebarWidth = clampedSidebarWidth(sidebarWidth + 10)
+                case .decrement: sidebarWidth = clampedSidebarWidth(sidebarWidth - 10)
+                @unknown default: break
+                }
+            }
+    }
+
+    private func clampedSidebarWidth(_ width: CGFloat) -> CGFloat {
+        min(260, max(160, width))
+    }
+
+    @ViewBuilder
+    private func sidebarResizePointer<Divider: View>(_ divider: Divider) -> some View {
+        if #available(macOS 15, *) {
+            divider.pointerStyle(.columnResize)
+        } else {
+            divider.onHover { hovering in
+                let cursor: NSCursor = hovering ? .resizeLeftRight : .arrow
+                cursor.set()
+            }
+        }
     }
 
     private var triggers: some View {
@@ -125,6 +245,26 @@ struct PreferencesView: View {
             Section(L10n.text("啟動")) {
                 LoginItemSetting()
                 Toggle(L10n.text("在 Dock 顯示"), isOn: $settings.showsDockIcon)
+            }
+
+            Section(L10n.text("軟體更新")) {
+                Toggle(L10n.text("自動檢查更新"), isOn: $settings.checksForUpdates)
+                Toggle(L10n.text("自動下載更新"), isOn: $settings.automaticallyDownloadsUpdates)
+                    .disabled(!settings.checksForUpdates)
+                    .help(L10n.text("關閉自動安裝時，新版 DMG 會存到「下載項目」。"))
+                Toggle(L10n.text("自動安裝更新"), isOn: $settings.automaticallyInstallsUpdates)
+                    .disabled(!settings.checksForUpdates || !settings.automaticallyDownloadsUpdates)
+                    .help(L10n.text("下載並驗證更新後，等你退出 Notch Finder 再安裝。"))
+                if settings.updateReadyToInstall {
+                    Text(L10n.text("更新已就緒，退出 Notch Finder 後安裝。"))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section {
+                Button(L10n.text("結束 Notch Finder")) {
+                    NSApplication.shared.terminate(nil)
+                }
             }
         }
         .formStyle(.grouped)
@@ -158,8 +298,10 @@ struct PreferencesView: View {
                 }
             }
             Section(L10n.text("列表")) {
-                Picker(L10n.text("檔案顯示方式"), selection: $settings.displayMode) {
-                    ForEach(FileDisplayMode.allCases, id: \.self) { mode in Text(mode.title).tag(mode) }
+                Picker(L10n.text("預設檔案顯示方式"), selection: $settings.defaultDisplayMode) {
+                    ForEach(FileDisplayMode.allCases, id: \.self) { mode in
+                        Label(mode.title, systemImage: mode.symbol).tag(mode)
+                    }
                 }
                 Picker(L10n.text("預設排序"), selection: $settings.fileSort) {
                     ForEach(FileSort.allCases, id: \.self) { sort in Text(sort.title).tag(sort) }

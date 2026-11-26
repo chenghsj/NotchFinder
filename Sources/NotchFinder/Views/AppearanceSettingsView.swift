@@ -103,7 +103,7 @@ struct AppearanceSettingsView: View {
                 .clipShape(.rect(cornerRadius: 4))
                 .accessibilityHidden(true)
                 HStack(spacing: 4) {
-                    Text(mode.label)
+                    Text(mode == .system ? L10n.text("色彩模式跟隨系統") : mode.label)
                         .lineLimit(1)
                     if settings.appearance.colorMode == mode {
                         Image(systemName: "checkmark.circle.fill")

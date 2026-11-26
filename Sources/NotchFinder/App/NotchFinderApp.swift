@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let shortcuts = PanelShortcuts()
     private lazy var controller = NotchController(settings: settings, shortcuts: shortcuts)
     private lazy var preferences = PreferencesWindowController(settings: settings, shortcuts: shortcuts, controller: controller)
+    private lazy var updates = AppUpdates(settings: settings)
     private var globalHotKey: PanelGlobalHotKey?
     private var settingsMenuItems: [NSMenuItem] = []
     private var localizedMenuItems: [(item: NSMenuItem, key: String)] = []
@@ -47,20 +48,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func finishLaunching(needsPermission: Bool, opensPreferences: Bool) {
         let opensFileAccessSettings = needsPermission && FileAccess.confirmRequest()
 
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = makeStatusBarIcon()
-        item.button?.toolTip = "Notch Finder"
-        item.button?.target = self
-        item.button?.action = #selector(handleStatusClick(_:))
-
-        let showItem = addLocalizedItem("顯示檔案面板", to: statusMenu, action: #selector(showPanel))
-        showItem.target = self
-        let preferencesItem = addPreferencesItem(to: statusMenu)
-        preferencesItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
-        preferencesItem.image?.isTemplate = true
-        statusMenu.addItem(.separator())
-        addLocalizedItem("結束 Notch Finder", to: statusMenu, action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        statusItem = item
+        // macOS remembers menu bar apps even after their temporary bundles are deleted.
+        if ProcessInfo.processInfo.environment["NOTCH_FINDER_TEST_DATA_DIR"] == nil {
+            configureStatusItem()
+        }
 
         let globalHotKey = PanelGlobalHotKey { [weak self] in
             guard let self, !self.preferences.isRecording else { return }
@@ -76,6 +67,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if opensFileAccessSettings { FileAccess.openSystemSettings() }
         else if opensPreferences { openPreferences() }
         else { controller.showPanel() }
+
+        settings.updatePreferencesDidChange = { [weak self] in self?.updates.restart() }
+        updates.restart()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -84,9 +78,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if updates.deferQuitForUpdateCancellation({ sender.reply(toApplicationShouldTerminate: true) }) {
+            return .terminateLater
+        }
+        return .terminateNow
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        updates.stop()
         controller.clipboardHistory.finishSaving()
         globalHotKey?.stop()
+    }
+
+    private func configureStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.image = makeStatusBarIcon()
+        item.button?.toolTip = "Notch Finder"
+        item.button?.target = self
+        item.button?.action = #selector(handleStatusClick(_:))
+
+        let showItem = addLocalizedItem("顯示檔案面板", to: statusMenu, action: #selector(showPanel))
+        showItem.target = self
+        let preferencesItem = addPreferencesItem(to: statusMenu)
+        preferencesItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
+        preferencesItem.image?.isTemplate = true
+        statusMenu.addItem(.separator())
+        addLocalizedItem("結束 Notch Finder", to: statusMenu, action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        statusItem = item
     }
 
     private func configureAppMenu() {
