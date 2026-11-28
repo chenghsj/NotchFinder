@@ -6,6 +6,8 @@ import Testing
 import os
 @testable import NotchFinder
 
+// These tests share AppKit's main run loop while waiting for file and window updates.
+@Suite(.serialized)
 @MainActor
 struct ArchitectureRegressionTests {
     @Test func emptyingTrashRemovesHiddenAndNestedItemsWithoutFollowingLinks() throws {
