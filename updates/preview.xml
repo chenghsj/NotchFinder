@@ -4,17 +4,17 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <channel>
         <title>NotchFinder</title>
         <item>
-            <title>0.1.2</title>
-            <pubDate>Thu, 26 Nov 2026 17:55:48 +0800</pubDate>
-            <link>https://github.com/chenghsj/NotchFinder/releases/tag/v0.1.2</link>
-            <sparkle:version>3</sparkle:version>
-            <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
+            <title>0.1.3</title>
+            <pubDate>Sat, 28 Nov 2026 16:00:28 +0800</pubDate>
+            <link>https://github.com/chenghsj/NotchFinder/releases/tag/v0.1.3</link>
+            <sparkle:version>4</sparkle:version>
+            <sparkle:shortVersionString>0.1.3</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/chenghsj/NotchFinder/releases/download/v0.1.2/NotchFinder-0.1.2-arm64.dmg" length="6529721" type="application/octet-stream" sparkle:edSignature="1ElSUpbFsFzrS7mZa3uAGKA6exn26mZXA1XGjZ+wq4gYWAdWtnW4UF8qFj6MboJ8goLu5+kL9PpbTJuPv3C0DQ=="></enclosure>
+            <enclosure url="https://github.com/chenghsj/NotchFinder/releases/download/v0.1.3/NotchFinder-0.1.3-arm64.dmg" length="5127692" type="application/octet-stream" sparkle:edSignature="fyE4QN2lIFMCuN8SdhAYs9ZENE09RRa2mpDeEn7swkKGYkwP4YTHmv+H6NG7Mn3MfUyHBC/6J7IhKvccT08DCQ=="></enclosure>
         </item>
     </channel>
 </rss><!-- sparkle-signatures:
-edSignature: KcbSk/B5AACquKabT8C+Uzjguh/SlsU2g7hdibDOf4W+kMxSYscc1jduoJYGqiFb32yCP+qhmg0FLzrabOcbCQ==
+edSignature: NGzkTyANCGFmozIVakCnrVYEaZ5gsxPMPuVgbDafBIAckuF+QY1fdvyoWXuUBh0deNFACnZ59yeqynigBo7ZAg==
 length: 1220
 -->
