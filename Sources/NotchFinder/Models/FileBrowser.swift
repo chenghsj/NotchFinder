@@ -46,12 +46,21 @@ enum BrowserEdit: Equatable {
 @Observable
 final class FileBrowser {
     enum Destination: Hashable, Sendable {
-        case folder(URL), recentItems
+        case folder(URL), recentItems, tag(String)
 
-        var displayModeKey: String {
+        var preferenceKey: String {
             switch self {
             case .folder(let folder): "folder:\(folder.standardizedFileURL.path)"
             case .recentItems: "recents"
+            case .tag(let name): "tag:\(name)"
+            }
+        }
+
+        var spotlightSearch: SpotlightFileSearch.Scope? {
+            switch self {
+            case .folder: nil
+            case .recentItems: .recents
+            case .tag(let name): .tag(name)
             }
         }
     }
@@ -64,28 +73,36 @@ final class FileBrowser {
 
     let sidebar: SidebarLocations
     @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let settings: NotchSettings
+    @ObservationIgnored private let fileHistory: FileOperationHistory
     private(set) var destination: Destination
+    private(set) var displayMode: FileDisplayMode
+    @ObservationIgnored private var installedApplicationsFolder: URL?
     private var lastFolder: URL
     private(set) var entries: [FileEntry] = []
     private(set) var expandedFolders: [URL: [FileEntry]] = [:]
     private var inlineExpansions: Set<URL> = []
+    private(set) var inlineCollapseChange = 0
     private(set) var columnPath: [URL] = []
     private(set) var activeColumn: URL?
     private(set) var isLoading = false
     private(set) var readError: String?
-    private(set) var openError: String?
+    private var localError: String?
+    private(set) var openError: String? {
+        get { localError ?? (showsTrash ? fileHistory.trashFailure?.message : nil) }
+        set { localError = newValue }
+    }
+    var trashRecovery: TrashRemovalRequest? { fileHistory.trashFailure?.request }
     private(set) var fileIconsEnabled = false
     private(set) var showsHidden: Bool
     private(set) var editing: BrowserEdit?
-    private(set) var isUpdatingFiles = false {
-        didSet { if !isUpdatingFiles { scheduleFolderRefresh() } }
-    }
+    var isUpdatingFiles: Bool { fileHistory.isRunning }
     @ObservationIgnored var onDirectoryChange: (() -> Void)?
-    @ObservationIgnored var onPreview: ((Set<URL>) -> Void)?
-    var selection: Set<URL> = []
+    @ObservationIgnored var onPreview: (([FileEntry]) -> Void)?
+    private(set) var selection: Set<URL> = []
     var filter = "" {
         didSet {
-            if !columnPath.isEmpty { pruneExpandedFolders() }
+            if filter != oldValue { pruneExpandedFolders() }
         }
     }
     var editText = ""
@@ -93,43 +110,48 @@ final class FileBrowser {
 
     private var backHistory: [Destination] = []
     private var forwardHistory: [Destination] = []
-    @ObservationIgnored private var hasLoadedContents = false
-    @ObservationIgnored private var loadTask: Task<Void, Never>?
-    @ObservationIgnored private var activationRefreshTask: Task<Void, Never>?
-    private var folderTasks: [URL: Task<Void, Never>] = [:]
-    @ObservationIgnored private var contentMonitoringEnabled = false
-    @ObservationIgnored private var folderMonitor: FolderChangeMonitor?
-    @ObservationIgnored private var monitoredDirectory: URL?
-    @ObservationIgnored private var pendingFolderRefreshes: Set<URL> = []
-    @ObservationIgnored private var refreshTask: Task<Void, Never>?
+    @ObservationIgnored private let contentSource: BrowserContentRefresh.Source
+    @ObservationIgnored private lazy var contentRefresh = BrowserContentRefresh(
+        destination: destination, includeHidden: showsHidden, source: contentSource,
+        fileOperationInProgress: { [fileHistory] in fileHistory.isRunning }
+    ) { [weak self] change in
+        self?.applyContentChange(change)
+    }
 
-    init(initialDirectory: URL? = nil, sidebar: SidebarLocations? = nil, defaults: UserDefaults = .standard) {
+    init(initialDirectory: URL? = nil, sidebar: SidebarLocations? = nil, settings: NotchSettings,
+         contentSource: BrowserContentRefresh.Source = .live, fileHistory: FileOperationHistory = FileOperationHistory()) {
+        let defaults = settings.defaults
         self.sidebar = sidebar ?? SidebarLocations(defaults: defaults)
         self.defaults = defaults
+        self.settings = settings
+        self.contentSource = contentSource
+        self.fileHistory = fileHistory
         let manager = FileManager.default
         let home = manager.homeDirectoryForCurrentUser.standardizedFileURL
         let folder = initialDirectory ?? home
         destination = .folder(folder)
+        displayMode = settings.displayMode(for: .folder(folder))
         lastFolder = folder
         showsHidden = defaults.bool(forKey: "showsHiddenItems")
     }
 
-    deinit { loadTask?.cancel() }
-
     var directory: URL { lastFolder }
+    var isBrowsingFolder: Bool { destination.spotlightSearch == nil }
     var showsRecentItems: Bool { destination == .recentItems }
+    var showsTrash: Bool { isBrowsingFolder && directory.path == sidebar.trashDirectory?.path }
 
     var title: String {
         if showsRecentItems { return L10n.text("最近項目") }
+        if case .tag(let name) = destination { return name }
         if let location = sidebar.items.first(where: { $0.url == directory }) { return location.name }
         return name(for: directory)
     }
 
     var canGoBack: Bool { !backHistory.isEmpty }
     var canGoForward: Bool { !forwardHistory.isEmpty }
-    var canGoUp: Bool { !showsRecentItems && directory.path != "/" }
-    var canPinFolder: Bool { !showsRecentItems && sidebar.canFavorite(directory) }
-    var isPinned: Bool { !showsRecentItems && sidebar.isFavorite(directory) }
+    var canGoUp: Bool { isBrowsingFolder && directory.path != "/" }
+    var canPinFolder: Bool { isBrowsingFolder && sidebar.canFavorite(directory) }
+    var isPinned: Bool { isBrowsingFolder && sidebar.isFavorite(directory) }
 
     var breadcrumbs: [URL] {
         var path = directory
@@ -151,50 +173,85 @@ final class FileBrowser {
         }
     }
 
-    func listedEntries(from roots: [FileEntry], orderChildren: ([FileEntry]) -> [FileEntry] = { $0 }) -> [FileEntry] {
-        listedEntries(from: roots, expanding: inlineExpansions, orderChildren: orderChildren)
+    var listing: FileListing { FileListing(browser: self, settings: settings) }
+
+    func setDisplayMode(_ mode: FileDisplayMode) {
+        settings.setDisplayMode(mode, for: destination)
+        filePresentationDidChange()
     }
 
-    private func listedEntries(from roots: [FileEntry], expanding folders: Set<URL>,
-                               orderChildren: ([FileEntry]) -> [FileEntry] = { $0 }) -> [FileEntry] {
-        guard !folders.isEmpty else { return roots }
-        var result: [FileEntry] = []
-        func append(_ entries: [FileEntry]) {
-            for entry in entries {
-                result.append(entry)
-                if entry.canExpand, folders.contains(entry.url), let children = expandedFolders[entry.url] {
-                    append(orderChildren(children))
-                }
-            }
+    func filePresentationDidChange() {
+        if let tableSort, tableSort.preferred != settings.fileSort || tableSort.grouped != groupsFilesByAddedDate {
+            self.tableSort = nil
         }
-        append(roots)
-        return result
+        let mode = settings.displayMode(for: destination)
+        guard displayMode != mode else { return }
+        displayMode = mode
+        if mode != .columns, !columnPath.isEmpty || activeColumn != nil {
+            columnPath = []
+            activeColumn = nil
+            pruneExpandedFolders()
+        } else if !selection.isEmpty {
+            selectItems(selection)
+        }
+    }
+
+    func selectItems(_ items: Set<URL>) {
+        guard !items.isEmpty else {
+            if !selection.isEmpty { selection = [] }
+            return
+        }
+        let visibleItems = FileListing(browser: self, settings: settings, inDisplayOrder: false).visibleSelection(items)
+        if selection != visibleItems { selection = visibleItems }
+    }
+
+    func selectAll() {
+        let listing = self.listing
+        if listing.displayMode == .columns {
+            selectColumnItems(Set(listing.entries(in: activeColumn).map(\.id)), in: activeColumn)
+        } else {
+            selection = listing.visibleIDs
+        }
+    }
+
+    func moveGallerySelection(by offset: Int) -> Bool {
+        guard displayMode == .gallery else { return false }
+        let entries = listing.entries
+        guard !entries.isEmpty else { return false }
+        let current = entries.firstIndex { selection.contains($0.id) } ?? 0
+        selection = [entries[min(entries.count - 1, max(0, current + offset))].id]
+        return true
+    }
+
+    var outline: FileListing.Outline {
+        let overlappingRoots = if case .tag = destination { true } else { false }
+        return FileListing.Outline(expanded: inlineExpansions, childrenByFolder: expandedFolders, overlappingRoots: overlappingRoots)
     }
 
     func entries(matching items: Set<URL>) -> [FileEntry] {
         guard !items.isEmpty else { return [] }
-        return listedEntries(from: displayedEntries, expanding: inlineExpansions.union(columnPath))
-            .filter { items.contains($0.url) }
+        return listing.selected(items)
     }
 
-    func groupsFilesByAddedDate(for settings: NotchSettings) -> Bool {
+    var groupsFilesByAddedDate: Bool {
         guard settings.groupsByAddedDate, case .folder(let folder) = destination else { return false }
         return Self.dateGroupedPaths.contains(folder.standardizedFileURL.path)
     }
 
-    func tableSortOrder(for settings: NotchSettings) -> [KeyPathComparator<FileEntry>] {
+    var tableSortOrder: [KeyPathComparator<FileEntry>] {
         guard let tableSort, tableSort.preferred == settings.fileSort,
-              tableSort.grouped == groupsFilesByAddedDate(for: settings) else { return [] }
+              tableSort.grouped == groupsFilesByAddedDate else { return [] }
         return tableSort.order
     }
 
-    func setTableSortOrder(_ order: [KeyPathComparator<FileEntry>], for settings: NotchSettings) {
-        tableSort = order.isEmpty ? nil : (settings.fileSort, groupsFilesByAddedDate(for: settings), order)
+    func setTableSortOrder(_ order: [KeyPathComparator<FileEntry>]) {
+        tableSort = order.isEmpty ? nil : (settings.fileSort, groupsFilesByAddedDate, order)
     }
 
-    func toggleExpansion(of folder: FileEntry) {
+    func toggleExpansion(of folder: FileEntry, animateLayout: Bool = true) {
         guard folder.canExpand else { return }
         if inlineExpansions.remove(folder.url) != nil {
+            if animateLayout { inlineCollapseChange += 1 }
             pruneExpandedFolders()
         } else {
             inlineExpansions.insert(folder.url)
@@ -204,43 +261,29 @@ final class FileBrowser {
 
     func isExpandedInList(_ folder: URL) -> Bool { inlineExpansions.contains(folder) }
 
-    func isLoadingContents(of folder: URL) -> Bool { folderTasks[folder] != nil }
+    func isLoadingContents(of folder: URL) -> Bool { contentRefresh.loadingFolders.contains(folder) }
 
     func selectColumnItems(_ items: Set<URL>, in folder: URL?) {
-        let parentPath: [URL]
-        let siblings: [FileEntry]
-        if let folder {
-            guard let index = columnPath.firstIndex(of: folder) else { return }
-            parentPath = Array(columnPath[...index])
-            siblings = expandedFolders[folder] ?? []
-        } else {
-            parentPath = []
-            siblings = displayedEntries
-        }
-        let child = items.count == 1 && !showsRecentItems
-            ? siblings.first { items.contains($0.id) && $0.canExpand }?.url
+        guard displayMode == .columns, let column = FileListing.Column(folder: folder, browser: self) else { return }
+        let visibleItems = column.matchingIDs(items)
+        let child = visibleItems.count == 1
+            ? column.entries.first { visibleItems.contains($0.id) && $0.canExpand }?.url
             : nil
         activeColumn = folder
-        selection = items
-        let path = child.map { parentPath + [$0] } ?? parentPath
+        selection = visibleItems
+        let parentPath = columnPath.prefix(column.index)
+        let path = Array(parentPath) + (child.map { [$0] } ?? [])
         guard columnPath != path else { return }
         columnPath = path
         pruneExpandedFolders()
         if let child { expand(child) }
     }
 
-    func resetColumns() {
-        guard !columnPath.isEmpty else { return }
-        columnPath = []
-        activeColumn = nil
-        pruneExpandedFolders()
-    }
-
     private func expand(_ folder: URL) {
         guard expandedFolders[folder] == nil else { return }
         expandedFolders[folder] = []
         openError = nil
-        loadExpandedFolder(folder, includeHidden: showsHidden)
+        contentRefresh.expand(folder)
     }
 
     func name(for url: URL) -> String {
@@ -255,7 +298,7 @@ final class FileBrowser {
         guard showsHidden != value else { return }
         showsHidden = value
         defaults.set(value, forKey: "showsHiddenItems")
-        reload()
+        contentRefresh.setIncludesHidden(value)
     }
 
     func navigate(to destination: URL) {
@@ -278,18 +321,26 @@ final class FileBrowser {
         guard belongsToVolume(directory) else { return }
         let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
         let fallback = belongsToVolume(home) ? URL(fileURLWithPath: "/", isDirectory: true) : home
-        if showsRecentItems {
+        if !isBrowsingFolder {
             lastFolder = fallback
             onDirectoryChange?()
-            reload(quietly: true)
+            contentRefresh.reload(quietly: true)
         } else {
             load(.folder(fallback))
         }
     }
 
     func showRecentItems() {
-        if showsRecentItems { reload() }
-        else { navigate(to: .recentItems) }
+        showSearch(.recentItems)
+    }
+
+    func showTag(_ name: String) {
+        showSearch(.tag(name))
+    }
+
+    private func showSearch(_ target: Destination) {
+        if destination == target { reload() }
+        else { navigate(to: target) }
     }
 
     private func navigate(to target: Destination) {
@@ -332,29 +383,17 @@ final class FileBrowser {
     }
 
     func showPreview(_ items: Set<URL>) {
-        if !items.isEmpty { onPreview?(items) }
+        let entries = entries(matching: items)
+        if !entries.isEmpty { onPreview?(entries) }
     }
 
-    func activate() {
-        let includeHidden = defaults.bool(forKey: "showsHiddenItems")
-        let hiddenItemsChanged = showsHidden != includeHidden
-        showsHidden = includeHidden
-        enableFileIcons()
-        if showsRecentItems || hiddenItemsChanged || (!hasLoadedContents && loadTask == nil) {
-            reload()
-            return
+    func setContentActive(_ active: Bool, revalidation: BrowserContentRefresh.Revalidation) {
+        if active {
+            showsHidden = defaults.bool(forKey: "showsHiddenItems")
+            openError = nil
         }
-
-        openError = nil
-        // Inactive folders are unwatched. Revalidate once the tab stays active.
-        activationRefreshTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(150))
-            guard let self, !Task.isCancelled else { return }
-            await self.loadTask?.value
-            guard !Task.isCancelled else { return }
-            self.activationRefreshTask = nil
-            self.reload(quietly: self.hasLoadedContents)
-        }
+        contentRefresh.setActive(active, includeHidden: showsHidden, revalidation: revalidation)
+        if active { _ = visitInstalledApplicationsFolder() }
     }
 
     func revealInFinder(_ items: Set<URL>) {
@@ -379,12 +418,12 @@ final class FileBrowser {
     }
 
     func pasteItems(cleanupInstaller: Bool = false) {
-        guard !showsRecentItems else { return }
+        guard isBrowsingFolder else { return }
         pasteItems(ClipboardContents.fileURLs(from: .general), cleanupInstaller: cleanupInstaller)
     }
 
     func pasteItems(_ sources: [URL], cleanupInstaller: Bool) {
-        guard !showsRecentItems else { return }
+        guard isBrowsingFolder else { return }
         guard !sources.isEmpty else { openError = L10n.text("剪貼簿裡沒有檔案"); return }
         let folder = directory
         if cleanupInstaller, sources.count == 1, let app = sources.first,
@@ -396,112 +435,53 @@ final class FileBrowser {
         updateFiles { try LocalFileOperations.copy(sources, into: folder) }
     }
 
-    func installApplication(_ app: URL, cleanupInstaller: Bool) {
-        guard !isUpdatingFiles else { return }
+    enum DropDestination: Equatable, Sendable {
+        case folder(URL)
+        case trash
+    }
+
+    func acceptFileDrop(into destination: DropDestination, copies: Bool,
+                        load: (@escaping @MainActor ([URL]) -> Void) -> Void) -> Bool {
+        guard let execute = fileHistory.reserve(from: self) else { return false }
+        load { [fileHistory] urls in
+            execute {
+                guard !urls.isEmpty else { return .files(L10n.text("無法讀取拖放的檔案")) }
+                return .files(await fileHistory.perform {
+                    switch destination {
+                    case .folder(let folder): try LocalFileOperations.drop(urls, into: folder, copies: copies)
+                    case .trash: try LocalFileOperations.trash(urls)
+                    }
+                })
+            }
+        }
+        return true
+    }
+
+    func installSelectedApplication(_ app: URL, cleanupInstaller: Bool) {
+        guard !entries(matching: [app]).isEmpty else { return }
+        installApplication(app, cleanupInstaller: cleanupInstaller)
+    }
+
+    private func installApplication(_ app: URL, cleanupInstaller: Bool) {
         let origin = destination
         let applications = DiskImageInstall.applicationsDirectory
-        isUpdatingFiles = true
-        openError = nil
-        Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) {
-                Result { try DiskImageInstall.install(app, into: applications, cleanup: cleanupInstaller) }
-            }.value
-            guard let self else { return }
-            self.isUpdatingFiles = false
-            switch result {
-            case .success(let warning):
-                if self.destination == origin, origin != .folder(applications) { self.navigate(to: applications) }
-                else if self.destination == .folder(applications) { self.reload() }
-                self.openError = warning
-            case .failure(let error):
-                self.openError = error.localizedDescription
+        runFileOperation { [fileHistory] in
+            do {
+                let outcome = try await Task.detached(priority: .userInitiated) {
+                    try DiskImageInstall.install(app, into: applications, cleanup: cleanupInstaller)
+                }.value
+                fileHistory.record(outcome.reversals)
+                return .installed(from: origin, into: applications, warning: outcome.warning)
+            } catch {
+                return .files(error.localizedDescription)
             }
         }
     }
 
-    func setContentMonitoring(_ enabled: Bool) {
-        if !enabled { cancelActivationRefresh() }
-        guard contentMonitoringEnabled != enabled else { return }
-        contentMonitoringEnabled = enabled
-        if enabled {
-            updateFolderMonitoring()
-        } else {
-            stopFolderMonitoring()
-            if showsRecentItems {
-                loadTask?.cancel()
-                loadTask = nil
-                isLoading = false
-            }
-        }
-    }
-
-    private func cancelActivationRefresh() {
-        activationRefreshTask?.cancel()
-        activationRefreshTask = nil
-    }
-
-    private func updateFolderMonitoring() {
-        if showsRecentItems { stopFolderMonitoring(); return }
-        guard contentMonitoringEnabled, monitoredDirectory != directory else { return }
-
-        stopFolderMonitoring()
-        let watched = directory
-        folderMonitor = FolderChangeMonitor(directory: watched) { [weak self] paths, rescan in
-            self?.receiveFolderChanges(paths, rescan: rescan, for: watched)
-        }
-        if folderMonitor != nil { monitoredDirectory = watched }
-    }
-
-    private func stopFolderMonitoring() {
-        folderMonitor = nil
-        monitoredDirectory = nil
-        refreshTask?.cancel()
-        refreshTask = nil
-        pendingFolderRefreshes.removeAll()
-    }
-
-    private func receiveFolderChanges(_ paths: [String], rescan: Bool, for watched: URL) {
-        guard contentMonitoringEnabled, monitoredDirectory == watched else { return }
-        if rescan {
-            pendingFolderRefreshes.insert(watched)
-        } else {
-            var affected: Set<String> = []
-            for path in paths {
-                affected.insert(path)
-                affected.insert((path as NSString).deletingLastPathComponent)
-            }
-            for folder in [watched] + expandedFolders.keys {
-                let path = folder.resolvingSymlinksInPath().path
-                // FSEvents can report the /private path of macOS system folders.
-                let privatePath = "/private" + path
-                if affected.contains(path) ||
-                    (affected.contains(privatePath) &&
-                     URL(fileURLWithPath: privatePath, isDirectory: true).resolvingSymlinksInPath().path == path) {
-                    pendingFolderRefreshes.insert(folder)
-                }
-            }
-        }
-        scheduleFolderRefresh()
-    }
-
-    private func scheduleFolderRefresh() {
-        guard !pendingFolderRefreshes.isEmpty, refreshTask == nil, loadTask == nil, !isUpdatingFiles else { return }
-        refreshTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(120))
-            guard let self, !Task.isCancelled else { return }
-            self.refreshTask = nil
-            guard self.loadTask == nil, !self.isUpdatingFiles else { return }
-
-            let folders = self.pendingFolderRefreshes
-            self.pendingFolderRefreshes.removeAll()
-            if folders.contains(self.directory) {
-                self.reload(quietly: true)
-            } else {
-                for folder in folders where self.expandedFolders[folder] != nil {
-                    self.loadExpandedFolder(folder, includeHidden: self.showsHidden)
-                }
-            }
-        }
+    func compressItems(_ items: Set<URL>) {
+        let chosen = urls(for: items)
+        guard !chosen.isEmpty else { return }
+        updateFiles { try LocalFileOperations.compress(chosen) }
     }
 
     func trashItems(_ items: Set<URL>) {
@@ -510,11 +490,48 @@ final class FileBrowser {
         updateFiles { try LocalFileOperations.trash(chosen) }
     }
 
+    func emptyTrash(retrying request: TrashRemovalRequest? = nil,
+                    authorize: @escaping @Sendable (TrashRemovalRequest) throws -> Void = { try $0.removeWithAdministratorPrivileges() }) {
+        guard let directory = sidebar.trashDirectory else { return }
+        runFileOperation {
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try LocalFileOperations.emptyTrash(at: directory, retrying: request, authorize: authorize)
+                }.value
+                return .emptiedTrash(nil, nil)
+            } catch let error as LocalFileOperations.Failure {
+                return .emptiedTrash(error.localizedDescription, error.trashRecovery)
+            } catch {
+                return .emptiedTrash(error.localizedDescription, nil)
+            }
+        }
+    }
+
+    func revealRemainingTrashItems() {
+        guard let request = trashRecovery else { return }
+        do {
+            let urls = try request.remainingItems().map { request.directory.appendingPathComponent($0.name, isDirectory: false) }
+            if urls.isEmpty { fileHistory.clearTrashFailure(); reload() }
+            else { NSWorkspace.shared.activateFileViewerSelecting(urls) }
+        } catch {
+            fileHistory.clearTrashFailure()
+            reload()
+            openError = error.localizedDescription
+        }
+    }
+
+    func replayFileOperation(_ direction: FileOperationHistory.Direction) {
+        guard fileHistory.canReplay(direction) else { return }
+        runFileOperation { [fileHistory] in .files(await fileHistory.replay(direction)) }
+    }
+
     func beginEditing(_ request: BrowserEdit) {
-        guard !isUpdatingFiles, request != .createFolder || !showsRecentItems else { return }
+        guard !isUpdatingFiles, request != .createFolder || isBrowsingFolder else { return }
         switch request {
         case .createFolder: editText = L10n.text("未命名資料夾")
-        case .rename(let item): editText = item.lastPathComponent
+        case .rename(let item):
+            guard !entries(matching: [item]).isEmpty else { return }
+            editText = item.lastPathComponent
         case .goToFolder: editText = directory.path
         }
         editing = request
@@ -547,106 +564,74 @@ final class FileBrowser {
         entries(matching: items).map(\.url)
     }
 
-    private func updateFiles(operation: @escaping @Sendable () throws -> Void) {
-        guard !isUpdatingFiles else { return }
-        let origin = destination
-        isUpdatingFiles = true
-        openError = nil
-        Task { [weak self] in
-            let error = await Task.detached(priority: .userInitiated) {
-                do { try operation(); return nil as String? }
-                catch { return error.localizedDescription }
-            }.value
-            guard let self else { return }
-            self.isUpdatingFiles = false
-            if self.destination == origin { self.reload() }
-            self.openError = error
-        }
+    private func updateFiles(operation: @escaping @Sendable () throws -> [FileReversal]) {
+        runFileOperation { [fileHistory] in .files(await fileHistory.perform(operation)) }
     }
 
-    func reload() { reload(quietly: false) }
+    private func runFileOperation(_ operation: @escaping FileOperationHistory.Operation) {
+        fileHistory.reserve(from: self)?(operation)
+    }
 
-    func reload(quietly: Bool) {
-        cancelActivationRefresh()
-        loadTask?.cancel()
-        let target = destination
-        let includeHidden = showsHidden
-        let tracksRecentItems = target == .recentItems && contentMonitoringEnabled
-        if !quietly {
+    func revealAfterInstall(from source: Destination, into applications: URL) {
+        // Only the initiating tab should navigate, even if installation finished while it was hidden.
+        if destination == source && source != .folder(applications) { installedApplicationsFolder = applications }
+    }
+
+    private func visitInstalledApplicationsFolder() -> Bool {
+        guard let folder = installedApplicationsFolder else { return false }
+        navigate(to: folder)
+        return true
+    }
+
+    func receive(_ result: FileOperationHistory.Completion) {
+        if !visitInstalledApplicationsFolder() { reload() }
+        showOperationMessage(result.message)
+    }
+
+    func showOperationMessage(_ message: String?) { openError = message }
+
+    func reload() { contentRefresh.reload() }
+
+    private func applyContentChange(_ change: BrowserContentRefresh.Change) {
+        switch change {
+        case .loading:
             isLoading = true
             readError = nil
             openError = nil
-        }
-
-        loadTask = Task { [weak self] in
-            defer {
-                if let self, !Task.isCancelled {
-                    self.loadTask = nil
-                    self.scheduleFolderRefresh()
-                }
+        case .paused:
+            isLoading = false
+        case .root(let result):
+            switch result {
+            case .success(let files):
+                if entries != files { entries = files }
+                readError = nil
+                if showsTrash, let request = trashRecovery,
+                   (try? request.remainingItems().isEmpty) == true { fileHistory.clearTrashFailure() }
+            case .failure(let error):
+                entries = []
+                readError = error.localizedDescription
             }
-            do {
-                if tracksRecentItems {
-                    try Task.checkCancellation()
-                    for try await files in RecentFileSearch.updates(includeHidden: includeHidden) {
-                        try Task.checkCancellation()
-                        guard let self else { return }
-                        self.applyLoadedFiles(files, includeHidden: includeHidden)
-                    }
-                } else {
-                    let files = try await Self.readContents(at: target, includeHidden: includeHidden)
-                    try Task.checkCancellation()
-                    self?.applyLoadedFiles(files, includeHidden: includeHidden)
+            pruneExpandedFolders()
+            isLoading = false
+        case .folder(let folder, let result):
+            switch result {
+            case .success(let children):
+                expandedFolders[folder] = children
+            case .failure(let error):
+                expandedFolders[folder] = nil
+                inlineExpansions.remove(folder)
+                if let index = columnPath.firstIndex(of: folder) {
+                    columnPath.removeSubrange(index...)
                 }
-            } catch {
-                guard !Task.isCancelled else { return }
-                self?.entries = []
-                self?.hasLoadedContents = false
-                self?.pruneExpandedFolders()
-                self?.readError = error.localizedDescription
-                self?.isLoading = false
+                openError = L10n.text("無法展開「%@」：%@", name(for: folder), error.localizedDescription)
             }
-        }
-    }
-
-    private func applyLoadedFiles(_ files: [FileEntry], includeHidden: Bool) {
-        if entries != files { entries = files }
-        hasLoadedContents = true
-        readError = nil
-        pruneExpandedFolders()
-        for expanded in Array(expandedFolders.keys) {
-            loadExpandedFolder(expanded, includeHidden: includeHidden)
-        }
-        isLoading = false
-    }
-
-    private func loadExpandedFolder(_ folder: URL, includeHidden: Bool) {
-        folderTasks[folder]?.cancel()
-        folderTasks[folder] = Task { [weak self] in
-            do {
-                let children = try await Self.readContents(of: folder, includeHidden: includeHidden)
-                try Task.checkCancellation()
-                guard let self, self.expandedFolders[folder] != nil else { return }
-                self.folderTasks[folder] = nil
-                self.expandedFolders[folder] = children
-                self.pruneExpandedFolders()
-            } catch {
-                guard !Task.isCancelled, let self, self.expandedFolders[folder] != nil else { return }
-                self.folderTasks[folder] = nil
-                self.expandedFolders[folder] = nil
-                self.inlineExpansions.remove(folder)
-                if let index = self.columnPath.firstIndex(of: folder) {
-                    self.columnPath.removeSubrange(index...)
-                }
-                self.openError = L10n.text("無法展開「%@」：%@", String(describing: self.name(for: folder)), String(describing: error.localizedDescription))
-                self.pruneExpandedFolders()
-            }
+            pruneExpandedFolders()
         }
     }
 
     private func pruneExpandedFolders() {
-        let listEntries = listedEntries(from: entries)
         if !inlineExpansions.isEmpty {
+            let listEntries = outline.rows(from: entries)
             inlineExpansions.formIntersection(listEntries.lazy.filter(\.canExpand).map(\.url))
         }
 
@@ -664,13 +649,10 @@ final class FileBrowser {
 
         let retained = inlineExpansions.union(columnPath)
         for folder in Array(expandedFolders.keys) where !retained.contains(folder) {
-            folderTasks.removeValue(forKey: folder)?.cancel()
             expandedFolders[folder] = nil
         }
-        if !selection.isEmpty {
-            let reachable = hadColumnPath ? activeColumn.flatMap { expandedFolders[$0] } ?? columnRoots : listEntries
-            selection.formIntersection(reachable.lazy.map(\.url))
-        }
+        contentRefresh.retainExpandedFolders(Set(expandedFolders.keys))
+        if !selection.isEmpty { selectItems(selection) }
     }
 
     func enableFileIcons() {
@@ -678,30 +660,33 @@ final class FileBrowser {
     }
 
     private func load(_ target: Destination) {
+        installedApplicationsFolder = nil
+        let wasGrouped = groupsFilesByAddedDate
         if showsRecentItems != (target == .recentItems) { tableSort = nil }
         if case .folder(let folder) = target { lastFolder = folder }
         destination = target
+        displayMode = settings.displayMode(for: target)
+        if groupsFilesByAddedDate != wasGrouped { tableSort = nil }
         entries = []
-        hasLoadedContents = false
         columnPath = []
         activeColumn = nil
         pruneExpandedFolders()
         editing = nil
         filter = ""
-        updateFolderMonitoring()
+        contentRefresh.navigate(to: target)
         onDirectoryChange?()
-        reload()
     }
 
     nonisolated static func readContents(of folder: URL, includeHidden: Bool) async throws -> [FileEntry] {
         try await readContents(at: .folder(folder), includeHidden: includeHidden)
     }
 
-    private nonisolated static func readContents(at destination: Destination, includeHidden: Bool) async throws -> [FileEntry] {
+    nonisolated static func readContents(at destination: Destination, includeHidden: Bool) async throws -> [FileEntry] {
         let reader = Task.detached(priority: .userInitiated) {
             switch destination {
             case .folder(let folder): try read(folder, includeHidden: includeHidden)
-            case .recentItems: try RecentFileSearch.read(includeHidden: includeHidden)
+            case .recentItems: try SpotlightFileSearch.read(in: .recents, includeHidden: includeHidden)
+            case .tag(let name): try SpotlightFileSearch.read(in: .tag(name), includeHidden: includeHidden)
             }
         }
         return try await withTaskCancellationHandler {

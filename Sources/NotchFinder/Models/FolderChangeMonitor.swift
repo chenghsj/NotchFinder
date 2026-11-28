@@ -13,7 +13,7 @@ final class FolderChangeMonitor {
     private let stream: FSEventStreamRef
 
     @MainActor
-    init?(directory: URL, receive: @escaping @MainActor ([String], Bool) -> Void) {
+    init?(directories: Set<URL>, receive: @escaping @MainActor ([String], Bool) -> Void) {
         let receiver = Receiver(receive)
         var context = FSEventStreamContext(
             version: 0,
@@ -41,8 +41,8 @@ final class FolderChangeMonitor {
             let receiver = Unmanaged<Receiver>.fromOpaque(info).takeUnretainedValue()
             MainActor.assumeIsolated { receiver.receive(paths, rescan) }
         }
-        let path = directory.resolvingSymlinksInPath().path
-        guard let stream = FSEventStreamCreate(nil, callback, &context, [path] as CFArray,
+        let paths = directories.map { $0.resolvingSymlinksInPath().path }
+        guard let stream = FSEventStreamCreate(nil, callback, &context, paths as CFArray,
                                                 FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.1, flags) else { return nil }
         FSEventStreamSetDispatchQueue(stream, DispatchQueue.main)
         guard FSEventStreamStart(stream) else {

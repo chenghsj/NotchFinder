@@ -145,16 +145,27 @@ final class ClipboardHistory {
         if isPreviewVisible { sample() }
     }
 
-    func restore(_ row: Row) -> ClipboardSnapshot? {
-        guard case .recorded(let selected) = row else {
-            if case .current(let snapshot) = row, snapshot.changeCount == pasteboard.changeCount { return snapshot }
-            return nil
+    func isCurrent(_ snapshot: ClipboardSnapshot) -> Bool {
+        snapshot.changeCount == pasteboard.changeCount
+    }
+
+    func availableContents(for row: Row) -> ClipboardContents? {
+        switch row {
+        case .current(let snapshot):
+            return isCurrent(snapshot) ? snapshot.contents : nil
+        case .recorded(let selected):
+            guard let entry = entries.first(where: { $0.id == selected.id }),
+                  entry.copiedAt.addingTimeInterval(retention.interval) > .now else { return nil }
+            return entry.contents
         }
-        guard let entry = entries.first(where: { $0.id == selected.id }),
-              entry.copiedAt.addingTimeInterval(retention.interval) > .now,
-              entry.contents.write(to: pasteboard) else { return nil }
-        let snapshot = ClipboardSnapshot(contents: entry.contents, changeCount: pasteboard.changeCount)
-        if isRecording { record(entry.contents) }
+    }
+
+    func restore(_ row: Row) -> ClipboardSnapshot? {
+        guard let contents = availableContents(for: row) else { return nil }
+        if case .current(let snapshot) = row { return snapshot }
+        guard contents.write(to: pasteboard) else { return nil }
+        let snapshot = ClipboardSnapshot(contents: contents, changeCount: pasteboard.changeCount)
+        if isRecording { record(contents) }
         recordedChangeCount = snapshot.changeCount
         if isPreviewVisible { currentSnapshot = snapshot }
         return snapshot

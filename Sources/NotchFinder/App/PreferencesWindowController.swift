@@ -7,12 +7,14 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
     private let shortcuts: PanelShortcuts
     private let settings: NotchSettings
     private let controller: NotchController
+    private let updates: AppUpdates
     private var preferredContentSize = NSSize(width: 680, height: 460)
 
-    init(settings: NotchSettings, shortcuts: PanelShortcuts, controller: NotchController) {
+    init(settings: NotchSettings, shortcuts: PanelShortcuts, controller: NotchController, updates: AppUpdates) {
         self.settings = settings
         self.shortcuts = shortcuts
         self.controller = controller
+        self.updates = updates
         super.init()
         settings.interfaceSizeDidChange = { [weak self] in self?.resizeForInterfaceSize() }
     }
@@ -25,7 +27,7 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
     func show() {
         if window == nil {
             let view = PreferencesView(settings: settings, shortcuts: shortcuts, tabs: controller.tabs,
-                                       clipboardHistory: controller.clipboardHistory,
+                                       clipboardHistory: controller.clipboardHistory, updates: updates,
                                        restoreSize: controller.restoreDefaultSize, saveSize: controller.savePreferredSize)
             let window = PreferencesWindow(contentViewController: NSHostingController(rootView: view))
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable]

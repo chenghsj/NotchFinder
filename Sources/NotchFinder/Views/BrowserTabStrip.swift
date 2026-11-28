@@ -58,7 +58,7 @@ struct BrowserTabStrip: View {
             .buttonStyle(.plain)
             .accessibilityAddTraits(isActive ? .isSelected : [])
             .accessibilityAction(named: L10n.text("關閉分頁")) { tabs.close(tab.id) }
-            .help(tab.browser.showsRecentItems ? tab.browser.title : tab.browser.directory.path)
+            .help(tab.browser.isBrowsingFolder ? tab.browser.directory.path : tab.browser.title)
 
             Button(L10n.text("關閉「%@」分頁", String(describing: tab.browser.title)), systemImage: "xmark") { tabs.close(tab.id) }
                 .labelStyle(.iconOnly)

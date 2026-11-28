@@ -1,11 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
-import CoreGraphics
 import QuickLookUI
-
-enum ClipboardPasteResult {
-    case started, copied, unavailable
-}
 
 @MainActor
 final class NotchController: NSObject {
@@ -25,27 +20,31 @@ final class NotchController: NSObject {
     private var panel: NotchPanel?
     private var currentDisplay: Display?
     private weak var foregroundPreferencesWindow: NSWindow?
-    private var hover = NotchHover()
-    private var fileDropDismissal: Task<Void, Never>?
-    private var resumesHoverAfterFileDrop = false
-    private var wasPreviewVisible = false
+    private var visibility = PanelVisibility()
     private var preferredPanelSize: CGSize
     private var sizeBeforeResize: CGSize?
-    private var pasteTarget: NSRunningApplication?
-    private var requestedPasteAccess = false
+    private lazy var clipboardPaste = ClipboardPaste(history: clipboardHistory, desktop: .live, folder: { [weak self] in
+        guard let self, browser.isBrowsingFolder else { return nil }
+        let browser = browser
+        return ClipboardPaste.Folder(available: !browser.isUpdatingFiles) { [weak self] urls in
+            guard let self else { return }
+            tabs.closeClipboard()
+            browser.pasteItems(urls, cleanupInstaller: settings.cleansDiskImageAfterInstall)
+        }
+    }, dismissPanel: { [weak self] in self?.dismiss() })
 
     init(settings: NotchSettings = NotchSettings(), shortcuts: PanelShortcuts = PanelShortcuts(),
          clipboardHistory: ClipboardHistory = ClipboardHistory()) {
         self.settings = settings
         self.shortcuts = shortcuts
         self.clipboardHistory = clipboardHistory
-        tabs = BrowserTabs(initialDirectory: settings.startDirectory, defaults: settings.defaults,
+        tabs = BrowserTabs(initialDirectory: settings.startDirectory, settings: settings,
                            clipboardHistory: clipboardHistory)
         preferredPanelSize = settings.remembersSize
             ? NotchGeometry.savedPanelSize(in: settings.defaults) : NotchGeometry.defaultPanelSize
         super.init()
-        browser.onPreview = { [weak self] items in self?.showPreview(items) }
-        tabs.onActivate = { [weak self] in self?.panel?.closePreview() }
+        browser.onPreview = { [weak self] items in self?.panel?.preview.show(items) }
+        tabs.onLeaveFileContent = { [weak self] in self?.panel?.preview.close() }
     }
 
     func start() {
@@ -74,6 +73,7 @@ final class NotchController: NSObject {
         }
         timer.tolerance = 0.01
         RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .eventTracking)
     }
 
     func showPanel(focus: Bool = false) {
@@ -92,8 +92,20 @@ final class NotchController: NSObject {
         }
     }
 
+    func toggleClipboard() {
+        let wasVisible = currentDisplay != nil
+        if wasVisible && tabs.showsClipboard {
+            dismiss()
+            return
+        }
+        if wasVisible { clipboardPaste.captureTarget() }
+        tabs.showClipboard()
+        showPanel(focus: true)
+        if !wasVisible && clipboardHistory.isWaitingForAccess { clipboardHistory.refreshPreview() }
+    }
+
     func prepareToShowPreferences() {
-        panel?.closePreview()
+        panel?.preview.close()
         if !settings.panelPinned { dismiss(animated: false) }
     }
 
@@ -104,7 +116,7 @@ final class NotchController: NSObject {
         guard let panel, currentDisplay != nil else { return }
         if let window, window.isVisible {
             orderPanel(panel, behind: window)
-        } else if panel.isVisible && !panel.isPreviewVisible {
+        } else if panel.isVisible && !panel.preview.isVisible {
             panel.orderFrontRegardless()
         }
     }
@@ -163,52 +175,50 @@ final class NotchController: NSObject {
         if currentDisplay != nil {
             showPanel()
         } else {
-            hover.didHide(suppressUntilExit: false)
+            visibility.didHide(suppressUntilExit: false)
         }
     }
 
     func updateHover(at pointer: NSPoint) {
-        let tracksEvents = RunLoop.main.currentMode == .eventTracking
-        if !tracksEvents { resumesHoverAfterFileDrop = false }
-        guard sizeBeforeResize == nil, !tracksEvents || resumesHoverAfterFileDrop else { return }
         let display = currentDisplay ?? displays.first { $0.trigger?.contains(pointer) == true }
-        let insidePanel = currentDisplay != nil && panel?.frame.insetBy(dx: -5, dy: -5).contains(pointer) == true
-        let heldOpen = currentDisplay != nil && (settings.panelPinned || !settings.autoHide)
-        let previewVisible = panel?.isPreviewVisible == true
-        if wasPreviewVisible && !previewVisible && currentDisplay != nil {
-            hover.didShow(manually: true)
-        }
-        wasPreviewVisible = previewVisible
-        let event = hover.update(
-            insideTrigger: (settings.hoverEnabled || currentDisplay != nil) && display?.trigger?.contains(pointer) == true,
-            insidePanel: insidePanel || browser.editing != nil || previewVisible || heldOpen,
-            mouseDown: NSEvent.pressedMouseButtons != 0,
+        let event = visibility.update(PanelVisibility.Sample(
             now: ProcessInfo.processInfo.systemUptime,
+            insideTrigger: (settings.hoverEnabled || currentDisplay != nil) && display?.trigger?.contains(pointer) == true,
+            insideAnyTrigger: displays.contains { $0.trigger?.contains(pointer) == true },
+            insidePanel: currentDisplay != nil && panel?.frame.insetBy(dx: -5, dy: -5).contains(pointer) == true,
+            mouseDown: NSEvent.pressedMouseButtons != 0,
+            trackingEvents: RunLoop.main.currentMode == .eventTracking,
+            resizing: sizeBeforeResize != nil,
+            editing: browser.editing != nil,
+            previewVisible: panel?.preview.isVisible == true,
+            automaticHide: settings.autoHide && !settings.panelPinned && panel?.attachedSheet == nil,
             showDelay: settings.hoverDelay,
             hideDelay: settings.hideDelay
-        )
+        )) {
+            guard let panel else { return false }
+            return NSWindow.windowNumber(at: pointer, belowWindowWithWindowNumber: 0) == panel.windowNumber
+        }
 
         switch event {
         case .show:
             if let display { present(on: display, manually: false) }
-        case .hide:
-            dismiss(suppressUntilExit: false)
+        case .hide(let suppressUntilExit):
+            dismiss(suppressUntilExit: suppressUntilExit)
         case nil:
             break
         }
     }
 
     private func present(on display: Display, manually: Bool, bringToFront: Bool = false) {
-        cancelFileDropDismissal()
         let panel = panel ?? makePanel()
         self.panel = panel
         let opening = currentDisplay == nil
         if opening {
-            rememberPasteTarget()
+            clipboardPaste.captureTarget()
             if !settings.remembersSize { preferredPanelSize = NotchGeometry.defaultPanelSize }
         }
         currentDisplay = display
-        hover.didShow(manually: manually)
+        visibility.didShow(manually: manually)
         tabs.setPanelVisible(true)
 
         let frameChanged = position(panel, on: display, requestedSize: preferredPanelSize)
@@ -222,6 +232,7 @@ final class NotchController: NSObject {
             panel.orderFrontRegardless()
             if opening { panel.makeKey() }
         }
+        panel.startHistoryEventMonitor()
         if opening || frameChanged || !wasVisible {
             content.setExpanded(true, animated: opening, speed: settings.animation) { [weak self] in
                 self?.browser.enableFileIcons()
@@ -231,14 +242,13 @@ final class NotchController: NSObject {
 
     private func dismiss(suppressUntilExit: Bool = true, animated: Bool = true) {
         guard currentDisplay != nil, let panel else { return }
-        cancelFileDropDismissal()
+        if let sheet = panel.attachedSheet { panel.endSheet(sheet, returnCode: .cancel) }
         finishResize()
         currentDisplay = nil
         tabs.setPanelVisible(false)
-        wasPreviewVisible = false
         settings.panelPinned = false
-        hover.didHide(suppressUntilExit: suppressUntilExit)
-        panel.closePreview()
+        visibility.didHide(suppressUntilExit: suppressUntilExit)
+        panel.preview.close()
 
         panel.animatedContent.setExpanded(false, animated: animated, speed: settings.animation) { [weak panel] in
             panel?.orderOut(nil)
@@ -246,30 +256,8 @@ final class NotchController: NSObject {
     }
 
     private func fileDragEnded() {
-        guard currentDisplay != nil, settings.autoHide, !settings.panelPinned else { return }
-        fileDropDismissal?.cancel()
-        let delay = settings.hideDelay
-        // The system can remain in event tracking after it delivers the drop.
-        fileDropDismissal = Task { [weak self] in
-            do { try await Task.sleep(for: .seconds(delay)) }
-            catch { return }
-            guard !Task.isCancelled, let self else { return }
-            fileDropDismissal = nil
-            guard currentDisplay != nil, let panel, settings.autoHide, !settings.panelPinned,
-                  sizeBeforeResize == nil, browser.editing == nil, !panel.isPreviewVisible else { return }
-            let pointer = NSEvent.mouseLocation
-            let windowUnderPointer = NSWindow.windowNumber(at: pointer, belowWindowWithWindowNumber: 0)
-            guard windowUnderPointer != panel.windowNumber else { return }
-            // Restore hover immediately while the completed drag still owns the tracking loop.
-            resumesHoverAfterFileDrop = true
-            let pointerAtNotch = displays.contains { $0.trigger?.contains(pointer) == true }
-            dismiss(suppressUntilExit: pointerAtNotch)
-        }
-    }
-
-    private func cancelFileDropDismissal() {
-        fileDropDismissal?.cancel()
-        fileDropDismissal = nil
+        visibility.fileDragEnded(now: ProcessInfo.processInfo.systemUptime, hideDelay: settings.hideDelay,
+                                 automaticHide: settings.autoHide && !settings.panelPinned)
     }
 
     @discardableResult
@@ -319,51 +307,42 @@ final class NotchController: NSObject {
         }
         if tabs.showsClipboard {
             switch command {
-            case .close, .back:
+            case .close:
                 if !event.isARepeat { tabs.closeClipboard() }
                 return true
             case .reload:
                 if !event.isARepeat { clipboardHistory.refreshPreview() }
                 return true
-            case .filter:
-                if !event.isARepeat { focusSearch() }
-                return true
             case .goToFolder, .paste:
                 if event.isARepeat { return true }
                 tabs.closeClipboard()
-            case .forward, .parent, .togglePanel, .settings, .pin, .newTab, .closeTab, .nextTab, .previousTab:
+            case .back, .forward, .parent, .togglePanel, .settings, .pin, .filter, .newTab, .closeTab, .nextTab, .previousTab:
                 break
             default:
                 return false
             }
         }
         let selection = browser.selection
-        if command == .preview && selection.isEmpty && panel?.isPreviewVisible != true { return false }
+        if command == .preview && selection.isEmpty && panel?.preview.isVisible != true { return false }
         if event.isARepeat { return true }
         switch command {
-        case .togglePanel: return false
+        case .togglePanel, .openClipboard: return false
         case .settings: showSettings()
         case .close: closeOrCancel()
         case .pin: settings.panelPinned.toggle()
-        case .back: browser.goBack()
+        case .back: navigateBack()
         case .forward: tabs.goForward()
         case .parent: tabs.goUp()
         case .goToFolder: browser.beginEditing(.goToFolder)
-        case .filter: focusSearch()
+        case .filter:
+            panel?.focusForInteraction()
+            settings.searchRequest = PanelSearchRequest(action: shortcuts.isSearchToggle(event) ? .toggle : .focus)
         case .reload: browser.reload()
         case .toggleHidden: browser.setShowsHidden(!browser.showsHidden)
         case .open: browser.openItems(selection)
         case .preview:
-            if panel?.isPreviewVisible == true { panel?.closePreview() }
-            else { browser.showPreview(selection) }
-        case .selectAll:
-            let listing = FileListing(browser: browser, settings: settings)
-            if listing.displayMode == .columns {
-                let column = browser.activeColumn
-                browser.selectColumnItems(Set(listing.entries(in: column).map(\.id)), in: column)
-            } else {
-                browser.selection = listing.visibleIDs
-            }
+            panel?.togglePreview()
+        case .selectAll: browser.selectAll()
         case .copy: browser.copyItems(selection)
         case .paste: browser.pasteItems(cleanupInstaller: settings.cleansDiskImageAfterInstall)
         case .copyPath: browser.copyPaths(selection)
@@ -378,96 +357,61 @@ final class NotchController: NSObject {
             else { closeOrCancel() }
         case .nextTab: tabs.cycle(forward: true)
         case .previousTab: tabs.cycle(forward: false)
+        case .undo: browser.replayFileOperation(.undo)
+        case .redo: browser.replayFileOperation(.redo)
         }
         return true
     }
 
+    private func navigateBack() {
+        if tabs.showsClipboard { tabs.closeClipboard() }
+        else { browser.goBack() }
+    }
+
     private func handleGalleryArrow(_ event: NSEvent) -> Bool {
-        guard !tabs.showsClipboard, panel?.isPreviewVisible != true, !(panel?.firstResponder is NSSlider),
-              settings.displayMode(for: browser.destination) == .gallery,
+        guard !tabs.showsClipboard, panel?.preview.isVisible != true, !(panel?.firstResponder is NSSlider),
               event.modifierFlags.intersection([.command, .control, .shift, .option]).isEmpty,
               event.keyCode == kVK_LeftArrow || event.keyCode == kVK_RightArrow else { return false }
-        let entries = FileListing(browser: browser, settings: settings).entries
-        guard !entries.isEmpty else { return false }
-        let current = entries.firstIndex { browser.selection.contains($0.id) }
-        let offset = event.keyCode == kVK_LeftArrow ? -1 : 1
-        let index = min(entries.count - 1, max(0, (current ?? 0) + offset))
-        browser.selection = [entries[index].id]
-        return true
+        return browser.moveGallerySelection(by: event.keyCode == kVK_LeftArrow ? -1 : 1)
     }
 
     private func closeOrCancel() {
-        if panel?.isPreviewVisible == true { panel?.closePreview() }
+        if panel?.preview.isVisible == true { panel?.preview.close(animated: true) }
         else if browser.editing != nil { browser.cancelEditing() }
         else if tabs.showsClipboard { tabs.closeClipboard() }
         else { dismiss() }
     }
 
-    private func showPreview(_ selected: Set<URL>) {
-        let entries = FileListing(browser: browser, settings: settings).selected(selected)
-        guard !entries.isEmpty else { return }
-        let folder = entries.count == 1 ? entries.first(where: \.isFolder) : nil
-        panel?.showPreview(entries.map(\.url), folder: folder, includeHidden: browser.showsHidden, settings: settings)
-    }
-
-    private func focusSearch() {
-        panel?.focusForInteraction()
-        settings.filterFocusRequest += 1
+    private func updateOpenPreview() {
+        panel?.preview.selectionDidChange { [weak self] in
+            guard let self, !tabs.showsClipboard else { return [] }
+            return browser.entries(matching: browser.selection)
+        }
     }
 
     private func showSettings() {
         openSettings?()
     }
 
-    private func rememberPasteTarget() {
-        if let app = NSWorkspace.shared.frontmostApplication,
-           app.processIdentifier != NSRunningApplication.current.processIdentifier,
-           app.activationPolicy == .regular {
-            pasteTarget = app
-        }
-    }
+    private func confirmEmptyTrash() {
+        guard let panel, panel.isVisible, panel.attachedSheet == nil,
+              let directory = browser.sidebar.trashDirectory, !browser.isUpdatingFiles else { return }
+        panel.preview.close()
+        panel.focusForInteraction()
 
-    private func pasteClipboard(_ row: ClipboardHistory.Row) -> ClipboardPasteResult {
-        if case .files(let urls) = row.contents {
-            guard !browser.isUpdatingFiles, !browser.showsRecentItems else { return .unavailable }
-            if case .current = row, clipboardHistory.restore(row) == nil { return .unavailable }
-            tabs.closeClipboard()
-            browser.pasteItems(urls, cleanupInstaller: settings.cleansDiskImageAfterInstall)
-            return .started
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L10n.text("要清空垃圾桶嗎？")
+        alert.informativeText = L10n.text("這會永久刪除本機垃圾桶中的所有項目，包括隱藏項目。此操作無法復原。")
+        let empty = alert.addButton(withTitle: L10n.text("清空垃圾桶"))
+        empty.hasDestructiveAction = true
+        empty.keyEquivalent = ""
+        alert.addButton(withTitle: L10n.text("取消")).keyEquivalent = "\u{1b}"
+        alert.beginSheetModal(for: panel) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            tabs.navigate(to: directory)
+            browser.emptyTrash()
         }
-
-        guard let target = pasteTarget, !target.isTerminated,
-              let snapshot = clipboardHistory.restore(row) else { return .unavailable }
-        if !CGPreflightPostEventAccess() {
-            guard !requestedPasteAccess else { return .copied }
-            requestedPasteAccess = true
-            guard CGRequestPostEventAccess() else { return .copied }
-        }
-
-        dismiss()
-        if !target.isActive {
-            NSApp.yieldActivation(to: target)
-            _ = target.activate(options: [])
-        }
-        let changeCount = snapshot.changeCount
-        Task { @MainActor in
-            for _ in 0..<15 {
-                if target.isActive || target.isTerminated { break }
-                try? await Task.sleep(for: .milliseconds(30))
-            }
-            try? await Task.sleep(for: .milliseconds(55))
-            let pid = target.processIdentifier
-            // If focus or clipboard data changed, leave the copied item available for manual paste.
-            guard !target.isTerminated, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
-                  NSPasteboard.general.changeCount == changeCount,
-                  let down = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true),
-                  let up = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: false) else { return }
-            down.flags = .maskCommand
-            up.flags = .maskCommand
-            down.postToPid(pid)
-            up.postToPid(pid)
-        }
-        return .started
     }
 
     private func makePanel() -> NotchPanel {
@@ -477,11 +421,9 @@ final class NotchController: NSObject {
             quickLookSources: QuickLookSources(),
             close: { [weak self] in self?.closeOrCancel() },
             openSettings: { [weak self] in self?.showSettings() },
-            clipboardPasteTarget: { [weak self] in
-                guard let target = self?.pasteTarget, !target.isTerminated else { return nil }
-                return target.localizedName
-            },
-            pasteClipboard: { [weak self] in self?.pasteClipboard($0) ?? .unavailable },
+            confirmEmptyTrash: { [weak self] in self?.confirmEmptyTrash() },
+            onFileSelectionChange: { [weak self] in self?.updateOpenPreview() },
+            clipboardPaste: clipboardPaste,
             resizeHandle: PanelResizeHandle(
                 begin: { [weak self] in self?.beginResize() },
                 update: { [weak self] delta in self?.resize(by: delta) },
@@ -489,17 +431,22 @@ final class NotchController: NSObject {
             ),
             onFileDragEnded: { [weak self] in self?.fileDragEnded() }
         ))
-        panel.beforeActivating = { [weak self] in self?.rememberPasteTarget() }
+        panel.beforeActivating = { [weak self] in self?.clipboardPaste.captureTarget() }
         panel.onEmptyTableClick = { [weak self] in
             guard let self, !tabs.showsClipboard else { return false }
-            browser.selection.removeAll()
+            browser.selectItems([])
             return true
         }
-        panel.onMouseDown = { [weak self] in
-            // A drag can leave the panel before the next pointer sample.
-            self?.resumesHoverAfterFileDrop = false
-            self?.cancelFileDropDismissal()
-            self?.hover.didInteract()
+        panel.onMouseDown = { [weak self] in self?.visibility.didInteract() }
+        panel.onFileListHeaderPress = { [weak self] in
+            guard let self, !tabs.showsClipboard, browser.displayMode == .list else { return }
+            settings.beginCustomizingFileListColumns(for: browser.destination)
+        }
+        panel.onNavigateHistory = { [weak self] forward in
+            guard let self, currentDisplay != nil else { return false }
+            if forward { tabs.goForward() }
+            else { navigateBack() }
+            return true
         }
         panel.title = "Notch Finder"
         panel.isFloatingPanel = true
@@ -513,13 +460,15 @@ final class NotchController: NSObject {
         panel.keyAction = { [weak self] event, editingText in
             self?.dispatchShortcut(event, editingText: editingText) == true
         }
-        panel.previewKeyAction = { [weak self] event in
-            let command = self?.shortcuts.command(for: event)
-            return command == .preview || command == .close
+        panel.previewKeyCommand = { [weak self] event in
+            guard let command = self?.shortcuts.command(for: event), command == .preview || command == .close else {
+                return nil
+            }
+            return command
         }
         panel.onDismiss = { [weak self] in
             guard let self else { return }
-            if self.browser.editing != nil || self.panel?.isPreviewVisible == true
+            if self.browser.editing != nil || self.panel?.preview.isVisible == true
                 || self.shortcuts[.close].matches(PanelCommand.close.defaultShortcut) {
                 self.closeOrCancel()
             }
@@ -529,25 +478,47 @@ final class NotchController: NSObject {
 }
 
 @MainActor
-private final class NotchPanel: NSPanel, @preconcurrency QLPreviewPanelDataSource, @preconcurrency QLPreviewPanelDelegate {
+final class NotchPanel: NSPanel, FilePreviewWindows, @preconcurrency QLPreviewPanelDataSource, @preconcurrency QLPreviewPanelDelegate {
     let animatedContent: AnimatedPanelView
     private let quickLookSources: QuickLookSources
     var onDismiss: (() -> Void)?
     var beforeActivating: (() -> Void)?
     var onMouseDown: (() -> Void)?
+    var onFileListHeaderPress: (() -> Void)?
+    var onNavigateHistory: ((_ forward: Bool) -> Bool)?
     var onEmptyTableClick: (() -> Bool)?
     var keyAction: ((NSEvent, Bool) -> Bool)?
-    var previewKeyAction: ((NSEvent) -> Bool)?
+    var previewKeyCommand: ((NSEvent) -> PanelCommand?)?
     private var previewItems: [URL] = []
+    private let tabs: BrowserTabs
+    private let settings: NotchSettings
+    private(set) lazy var preview = FilePreviewSession(windows: self)
+    private var isOpeningNativePreviewWithoutItems = false
     private weak var previewWindow: QLPreviewPanel?
     private var folderPreviewWindow: FolderPreviewPanel?
-    private var previewKeyMonitor: Any?
-    private weak var fileDragTarget: FileTileDragTarget?
-    private var fileDragStart = NSPoint.zero
+    private var recentlyClosedFolder: (url: URL, time: TimeInterval)?
+    private var reselectedFolderAfterPreview: URL?
+    private var historyEventMonitor: Any?
+    private var globalHistoryMonitor: Any?
+    private var previewEventMonitor: Any?
+    private var forwardingPreviewClick = false
+    private var nativeCloseButtonAction: (button: NSButton, target: AnyObject?, action: Selector?)?
 
-    var isPreviewVisible: Bool { previewWindow?.isVisible == true || folderPreviewWindow?.isVisible == true }
+    var canPresent: Bool { isVisible }
+    var visibleFolder: URL? {
+        guard let folderPreviewWindow, folderPreviewWindow.isVisible else { return nil }
+        return folderPreviewWindow.folderURL
+    }
+    var folderIsClosing: Bool { folderPreviewWindow?.ignoresMouseEvents == true }
+    var nativeState: FilePreviewSession.NativeState {
+        guard let previewWindow else { return .closed }
+        if previewWindow.ignoresMouseEvents { return .closing }
+        return previewWindow.isVisible ? .open : .closed
+    }
 
     init(rootView: BrowserPanel) {
+        tabs = rootView.tabs
+        settings = rootView.settings
         quickLookSources = rootView.quickLookSources
         animatedContent = AnimatedPanelView(rootView: rootView)
         super.init(
@@ -565,44 +536,131 @@ private final class NotchPanel: NSPanel, @preconcurrency QLPreviewPanelDataSourc
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
+    func startHistoryEventMonitor() {
+        guard historyEventMonitor == nil else { return }
+        // Mouse drivers may send navigation gestures to the foreground app while our panel is pinned.
+        globalHistoryMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.otherMouseDown, .swipe]) { [weak self] event in
+            guard let self, isVisible, !ignoresMouseEvents,
+                  isTopWindow(at: NSEvent.mouseLocation), handleHistoryEvent(event) else { return }
+            onMouseDown?()
+        }
+        // AppKit may receive these events without assigning them to a window.
+        historyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.otherMouseDown, .swipe]) { [weak self] event in
+            guard let self, event.windowNumber == 0, isVisible, !ignoresMouseEvents else { return event }
+            let point = event.type == .swipe ? NSEvent.mouseLocation : event.locationInWindow
+            guard isTopWindow(at: point), handleHistoryEvent(event) else { return event }
+            if event.type == .otherMouseDown { onMouseDown?() }
+            return nil
+        }
+    }
+
+    private func isTopWindow(at point: NSPoint) -> Bool {
+        frame.contains(point) && NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0) == windowNumber
+    }
+
+    override func orderOut(_ sender: Any?) {
+        if let historyEventMonitor { NSEvent.removeMonitor(historyEventMonitor) }
+        if let globalHistoryMonitor { NSEvent.removeMonitor(globalHistoryMonitor) }
+        historyEventMonitor = nil
+        globalHistoryMonitor = nil
+        super.orderOut(sender)
+    }
+
     func focusForInteraction() {
-        if !NSApp.isActive {
+        if NSWorkspace.shared.frontmostApplication != .current {
             beforeActivating?()
             NSApp.activate()
         }
         if !isKeyWindow { makeKey() }
     }
 
-    func showPreview(_ items: [URL], folder: FileEntry?, includeHidden: Bool, settings: NotchSettings) {
-        guard !items.isEmpty, isVisible else { return }
-        if let folder {
-            closePreview()
-            let source = quickLookSources.screenFrame(for: folder.url, in: self)
-            let window = FolderPreviewPanel(folder: folder, includeHidden: includeHidden,
-                                            interfaceSize: settings.interfaceSize)
-            window.handlesKey = previewKeyAction
-            window.onClose = { [weak self] in self?.folderPreviewWindow = nil }
-            folderPreviewWindow = window
-            focusForInteraction()
-            window.show(on: screen, sourceFrame: source, animation: settings.animation)
+    func presentFolder(_ folder: FileEntry, followingSelection: Bool) {
+        let sourceFrame: () -> NSRect = { [weak self, url = folder.url] in
+            guard let self else { return .zero }
+            return quickLookSources.screenFrame(for: url, in: self)
+        }
+        let hidden = tabs.active.browser.showsHidden
+        if let window = folderPreviewWindow, !window.ignoresMouseEvents, window.isVisible || followingSelection {
+            let resuming = !window.isVisible
+            window.updateFolder(folder, includeHidden: hidden, interfaceSize: settings.interfaceSize,
+                                sourceFrame: sourceFrame, reload: resuming)
+            if resuming {
+                window.show(above: self, animation: settings.animation, followingSelection: true, sourceFrame: sourceFrame)
+            }
             return
         }
+
         folderPreviewWindow?.close()
+        let window = FolderPreviewPanel(folder: folder, includeHidden: hidden, interfaceSize: settings.interfaceSize)
+        window.commandForKey = previewKeyCommand
+        window.onDismiss = { [weak self] url in
+            self?.recentlyClosedFolder = (url, ProcessInfo.processInfo.systemUptime)
+        }
+        window.onClose = { [weak self, weak window] in
+            guard let self, folderPreviewWindow === window else { return }
+            folderPreviewWindow = nil
+        }
+        folderPreviewWindow = window
+        focusForInteraction()
+        window.show(above: self, animation: settings.animation, followingSelection: followingSelection, sourceFrame: sourceFrame)
+    }
+
+    func dismissFolder(_ disposition: FilePreviewSession.FolderDismissal) {
+        guard let window = folderPreviewWindow else { return }
+        switch disposition {
+        case .keepForSelection: window.hideForSelectionChange()
+        case .animated where window.isVisible: window.dismiss()
+        default: window.close()
+        }
+    }
+
+    func reopenFolder() { folderPreviewWindow?.toggleVisibility() }
+
+    func togglePreview() {
+        let browser = tabs.active.browser
+        if !preview.toggle(for: browser.selection) { browser.showPreview(browser.selection) }
+    }
+
+    func dismissNative(followingSelection: Bool) {
+        guard let window = previewWindow else { return }
+        window.ignoresMouseEvents = true
+        if followingSelection { window.orderOut(nil) }
+        else { window.close() }
+    }
+
+    func presentFiles(_ items: [URL], followingSelection: Bool) {
+        if nativeState == .open, let window = previewWindow {
+            if previewItems != items {
+                previewItems = items
+                reloadNativePreview(window)
+            }
+            return
+        }
         guard let preview = QLPreviewPanel.shared() else { return }
         previewItems = items
         focusForInteraction()
         if !isMainWindow { makeMain() }
         if previewWindow === preview {
-            startPreviewKeyMonitor()
-            preview.reloadData()
-            preview.currentPreviewItemIndex = 0
+            startPreviewEventMonitor()
+            if !followingSelection { reloadNativePreview(preview) }
         }
-        preview.makeKeyAndOrderFront(nil)
+        preview.ignoresMouseEvents = false
+        if followingSelection {
+            // Quick Look can wait synchronously for the initial item while opening.
+            // Show the panel first, then load the selection through its in-place update path.
+            isOpeningNativePreviewWithoutItems = true
+            preview.orderFront(nil)
+            isOpeningNativePreviewWithoutItems = false
+            if previewWindow === preview { reloadNativePreview(preview) }
+        } else {
+            preview.makeKeyAndOrderFront(nil)
+        }
+        installNativeCloseButtonAction(for: preview)
     }
 
-    func closePreview() {
-        folderPreviewWindow?.close()
-        if let previewWindow, previewWindow.isVisible { previewWindow.close() }
+    private func reloadNativePreview(_ preview: QLPreviewPanel) {
+        preview.reloadData()
+        preview.currentPreviewItemIndex = 0
     }
 
     override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool {
@@ -614,21 +672,25 @@ private final class NotchPanel: NSPanel, @preconcurrency QLPreviewPanelDataSourc
             previewWindow = panel
             panel.dataSource = self
             panel.delegate = self
-            startPreviewKeyMonitor()
+            startPreviewEventMonitor()
         }
     }
 
     override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
         MainActor.assumeIsolated {
-            stopPreviewKeyMonitor()
+            stopPreviewEventMonitor()
+            restoreNativeCloseButtonAction()
             panel.dataSource = nil
             panel.delegate = nil
             previewWindow = nil
             previewItems = []
+            preview.nativeControlEnded { NSApp.isActive }
         }
     }
 
-    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int { previewItems.count }
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
+        isOpeningNativePreviewWithoutItems ? 0 : previewItems.count
+    }
 
     func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! {
         guard previewItems.indices.contains(index) else { return nil }
@@ -636,35 +698,106 @@ private final class NotchPanel: NSPanel, @preconcurrency QLPreviewPanelDataSourc
     }
 
     func previewPanel(_ panel: QLPreviewPanel!, sourceFrameOnScreenFor item: (any QLPreviewItem)!) -> NSRect {
-        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+        guard settings.animation != .off, !isOpeningNativePreviewWithoutItems,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
               let url = item?.previewItemURL else { return .zero }
         return quickLookSources.screenFrame(for: url, in: self)
     }
 
+    func windowShouldClose(_ window: NSWindow) -> Bool {
+        // Quick Look can continue receiving clicks during its closing transition.
+        window.ignoresMouseEvents = true
+        return true
+    }
+
     func windowWillClose(_ notification: Notification) {
-        stopPreviewKeyMonitor()
+        stopPreviewEventMonitor()
         previewItems = []
     }
 
-    private func startPreviewKeyMonitor() {
-        guard previewKeyMonitor == nil else { return }
-        // Let the user’s shortcut take precedence over Quick Look’s own shortcuts.
-        previewKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, let previewWindow = self.previewWindow, previewWindow.isVisible,
-                  (event.window ?? NSApp.keyWindow) === previewWindow,
-                  self.previewKeyAction?(event) == true else { return event }
-            if !event.isARepeat { self.closePreview() }
-            return nil
+    private func installNativeCloseButtonAction(for preview: QLPreviewPanel) {
+        guard let button = preview.standardWindowButton(.closeButton),
+              nativeCloseButtonAction?.button !== button else { return }
+        restoreNativeCloseButtonAction()
+        // Quick Look's close button can start its animation without calling the window delegate.
+        nativeCloseButtonAction = (button, button.target, button.action)
+        button.target = self
+        button.action = #selector(closeNativePreviewFromButton(_:))
+    }
+
+    private func restoreNativeCloseButtonAction() {
+        guard let original = nativeCloseButtonAction else { return }
+        nativeCloseButtonAction = nil
+        guard original.button.target === self else { return }
+        original.button.target = original.target
+        original.button.action = original.action
+    }
+
+    @objc private func closeNativePreviewFromButton(_ sender: NSButton) {
+        preview.close()
+    }
+
+    private func startPreviewEventMonitor() {
+        guard previewEventMonitor == nil else { return }
+        let events: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .leftMouseDragged, .leftMouseUp]
+        previewEventMonitor = NSEvent.addLocalMonitorForEvents(matching: events) { [weak self] event in
+            guard let self, let previewWindow else { return event }
+            if event.type == .keyDown {
+                return handleNativePreviewKey(event, from: event.window ?? NSApp.keyWindow) ? nil : event
+            }
+            return browserMouseEvent(event, duringZoomOf: previewWindow)
         }
     }
 
-    private func stopPreviewKeyMonitor() {
-        if let previewKeyMonitor { NSEvent.removeMonitor(previewKeyMonitor) }
-        previewKeyMonitor = nil
+    func handleNativePreviewKey(_ event: NSEvent, from target: NSWindow?) -> Bool {
+        // Keys queued during opening may still name the browser after Quick Look becomes key.
+        guard let previewWindow, let command = previewKeyCommand?(event),
+              target === previewWindow || (target === self && NSApp.keyWindow === previewWindow) else { return false }
+        if !event.isARepeat {
+            if command == .preview { togglePreview() }
+            else { preview.close() }
+        }
+        return true
+    }
+
+    private func browserMouseEvent(_ event: NSEvent, duringZoomOf preview: QLPreviewPanel) -> NSEvent {
+        // During its zoom, WindowServer can deliver clicks outside Quick Look's frame to it.
+        let point = event.cgEvent?.unflippedLocation ?? NSEvent.mouseLocation
+        if event.type == .leftMouseDown {
+            forwardingPreviewClick = event.window === preview && !preview.frame.contains(point)
+                && frame.contains(point) && isVisible && !ignoresMouseEvents
+                && NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: preview.windowNumber) == windowNumber
+        }
+        guard forwardingPreviewClick else { return event }
+        if event.type == .leftMouseUp { forwardingPreviewClick = false }
+        guard event.window !== self else { return event }
+        return NSEvent.mouseEvent(with: event.type, location: convertPoint(fromScreen: point),
+                                 modifierFlags: event.modifierFlags, timestamp: event.timestamp,
+                                 windowNumber: windowNumber, context: nil, eventNumber: event.eventNumber,
+                                 clickCount: event.clickCount, pressure: event.pressure) ?? event
+    }
+
+    private func stopPreviewEventMonitor() {
+        if let previewEventMonitor { NSEvent.removeMonitor(previewEventMonitor) }
+        previewEventMonitor = nil
+        forwardingPreviewClick = false
     }
 
     private var isEditingText: Bool {
         (firstResponder as? NSTextView)?.isFieldEditor == true
+    }
+
+    private func handleHistoryEvent(_ event: NSEvent) -> Bool {
+        let forward: Bool
+        switch event.type {
+        case .otherMouseDown where (3...4).contains(event.buttonNumber):
+            forward = event.buttonNumber == 4
+        case .swipe where event.deltaX != 0:
+            forward = event.deltaX < 0
+        default:
+            return false
+        }
+        return attachedSheet == nil && onNavigateHistory?(forward) == true
     }
 
     override func sendEvent(_ event: NSEvent) {
@@ -672,15 +805,37 @@ private final class NotchPanel: NSPanel, @preconcurrency QLPreviewPanelDataSourc
         if event.type == .leftMouseDown || event.type == .rightMouseDown || event.type == .otherMouseDown {
             onMouseDown?()
         }
+        if handleHistoryEvent(event) { return }
         if event.type == .leftMouseDown {
-            fileDragTarget = interactionTarget(FileTileDragTarget.self, at: event.locationInWindow)
-            fileDragStart = event.locationInWindow
+            let point = event.locationInWindow
+            let table = table(at: point, onHeader: onFileListHeaderPress)
+            // End the table's double-click sequence when the user dismisses a folder preview.
+            reselectedFolderAfterPreview = recentlyClosedFolder.flatMap {
+                event.timestamp - $0.time <= NSEvent.doubleClickInterval ? $0.url : nil
+            }
+            recentlyClosedFolder = nil
+            // Give the panel focus while the button is still down so this click can select the row.
             focusForInteraction()
+            if event.clickCount == 1, !event.modifierFlags.contains(.control),
+               let source = fileDragSource(at: point, in: table) {
+                if source.entry?.canExpand == true, interactionTarget(FileDisclosureHitArea.Target.self, at: point) != nil {
+                    super.sendEvent(event)
+                    return
+                }
+                if let table, tabs.active.browser.displayMode == .list {
+                    selectFileRowOnPress(event, in: table, source: source)
+                }
+                let singleSelection = event.modifierFlags.intersection([.command, .option, .shift]).isEmpty
+                let selectForwardedItem = forwardingPreviewClick && (table == nil || singleSelection) ? source.selectOnPress : nil
+                if trackFileDrag(from: event, source: source) { return }
+                // The file view never tracked the original press in Quick Look.
+                if let selectForwardedItem { selectForwardedItem(); return }
+            }
             if let slider = firstResponder as? NSSlider,
                !slider.bounds.contains(slider.convert(event.locationInWindow, from: nil)) {
                 makeFirstResponder(nil)
             }
-            if let table = table(at: event.locationInWindow) {
+            if let table {
                 // Let the table process the same click that ends field editing.
                 if isEditingText { makeFirstResponder(table) }
                 let point = table.convert(event.locationInWindow, from: nil)
@@ -691,26 +846,67 @@ private final class NotchPanel: NSPanel, @preconcurrency QLPreviewPanelDataSourc
                     }
                     if onEmptyTableClick?() == true { return }
                 }
+                if !event.modifierFlags.contains(.control) {
+                    FileClickTracking.forwardToAppKit(event) { super.sendEvent(event) }
+                    return
+                }
             }
-        } else if event.type == .leftMouseDragged, let fileDragTarget,
-                  hypot(event.locationInWindow.x - fileDragStart.x, event.locationInWindow.y - fileDragStart.y) >= 4 {
-            self.fileDragTarget = nil
-            if fileDragTarget.beginDrag(with: event) { return }
-        } else if event.type == .leftMouseUp {
-            fileDragTarget = nil
+        }
+        if event.type == .leftMouseUp, table(at: event.locationInWindow) != nil {
+            // AppKit may deliver a deferred table press while dispatching the corresponding release.
+            FileClickTracking.forwardToAppKit(event) { super.sendEvent(event) }
+            return
         }
         super.sendEvent(event)
     }
 
-    private func interactionTarget<T: NSView>(_ type: T.Type, at point: NSPoint) -> T? {
-        func find(in view: NSView) -> T? {
-            let localPoint = view.convert(point, from: nil)
-            guard !view.isHidden, view.visibleRect.contains(localPoint) else { return nil }
-            // SwiftUI's AppKit hosts can report a visible rect wider than the represented view.
-            if let target = view as? T, view.bounds.contains(localPoint) { return target }
-            return view.subviews.reversed().lazy.compactMap { find(in: $0) }.first
+    func isReselectingDismissedFolder(_ items: Set<URL>) -> Bool {
+        guard let folder = reselectedFolderAfterPreview, let event = NSApp.currentEvent,
+              event.type == .leftMouseDown || event.type == .leftMouseUp else { return false }
+        return items == [folder]
+    }
+
+    private func selectFileRowOnPress(_ event: NSEvent, in table: NSTableView, source: FileDragTarget) {
+        guard let select = source.selectOnPress, !isEditingText,
+              event.modifierFlags.intersection([.command, .shift, .option]).isEmpty else { return }
+        let tablePoint = table.convert(event.locationInWindow, from: nil)
+        let row = table.row(at: tablePoint)
+        guard row >= 0, !table.selectedRowIndexes.contains(row),
+              !isBlankTablePoint(tablePoint, in: table) else { return }
+        // Update the model and native highlight before drag tracking waits for movement or mouse-up.
+        select()
+        table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+    }
+
+    private func trackFileDrag(from mouseDown: NSEvent, source: FileDragTarget) -> Bool {
+        // Track before the table or tile handles mouseDown so it can start dragging on the first movement.
+        let mask: NSEvent.EventTypeMask = [.leftMouseDragged, .leftMouseUp]
+        let origin = mouseDown.locationInWindow
+        while isVisible {
+            let deadline = Date(timeIntervalSinceNow: FileClickTracking.checkInterval)
+            guard let event = NSApp.nextEvent(matching: mask, until: deadline, inMode: .eventTracking, dequeue: false) else {
+                if !FileClickTracking.isButtonDown { return true }
+                continue
+            }
+            if event.window !== self {
+                // Drag tracking reads directly from the queue, before local event monitors run.
+                guard forwardingPreviewClick, let previewWindow, event.window === previewWindow,
+                      let original = NSApp.nextEvent(matching: mask, until: .distantPast, inMode: .eventTracking,
+                                                     dequeue: true) else { return true }
+                let routed = browserMouseEvent(original, duringZoomOf: previewWindow)
+                guard routed.window === self else { return true }
+                NSApp.postEvent(routed, atStart: true)
+                continue
+            }
+            // Leave a normal mouseUp queued for the table or tile to finish the click.
+            if event.type == .leftMouseUp { return false }
+            _ = NSApp.nextEvent(matching: mask, until: .distantPast, inMode: .eventTracking, dequeue: true)
+            let point = event.locationInWindow
+            if hypot(point.x - origin.x, point.y - origin.y) >= 4, source.beginDrag(with: event) {
+                return true
+            }
         }
-        return contentView.flatMap { find(in: $0) }
+        return true
     }
 
     private func isBlankTablePoint(_ point: NSPoint, in table: NSTableView) -> Bool {
@@ -721,23 +917,6 @@ private final class NotchPanel: NSPanel, @preconcurrency QLPreviewPanelDataSourc
                 || outline.delegate?.outlineView?(outline, shouldSelectItem: item) == false
         }
         return table.rowView(atRow: index, makeIfNecessary: false)?.isGroupRowStyle == true
-    }
-
-    private func table(at point: NSPoint) -> NSTableView? {
-        guard let contentView else { return nil }
-        let location = contentView.superview?.convert(point, from: nil) ?? point
-        var hit = contentView.hitTest(location)
-        while let view = hit {
-            if let table = view as? NSTableView { return table }
-            if view is NSScroller || view is NSTableHeaderView { return nil }
-            if let scrollView = view as? NSScrollView,
-               let table = scrollView.documentView as? NSTableView,
-               scrollView.contentView.bounds.contains(scrollView.contentView.convert(point, from: nil)) {
-                return table
-            }
-            hit = view.superview
-        }
-        return nil
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {

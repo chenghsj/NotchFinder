@@ -3,6 +3,13 @@ import Foundation
 import Observation
 import SwiftUI
 
+struct PanelSearchRequest: Equatable {
+    enum Action { case focus, toggle }
+
+    let action: Action
+    private let id = UUID()
+}
+
 enum PanelAnimationSpeed: String, CaseIterable {
     case fast, standard, off
 
@@ -113,7 +120,10 @@ enum PreferencesPage: String, CaseIterable {
 @MainActor
 @Observable
 final class NotchSettings {
+    static let sharedFileListColumnsKey = "fileListColumnCustomization"
     static let sidebarWidths: ClosedRange<Double> = 112...260
+    static let gridIconSizes: ClosedRange<Double> = 24...128
+    private static let gridIconSizeKey = "gridIconSize"
     private static let locationDisplayModesKey = "fileDisplayModesByLocation"
     @ObservationIgnored let defaults: UserDefaults
     @ObservationIgnored var colorModeDidChange: ((PanelTheme) -> Void)?
@@ -121,6 +131,7 @@ final class NotchSettings {
     @ObservationIgnored var interfaceSizeDidChange: (() -> Void)?
     @ObservationIgnored var interfaceLanguageDidChange: ((InterfaceLanguage) -> Void)?
     @ObservationIgnored var updatePreferencesDidChange: (() -> Void)?
+    @ObservationIgnored var filePresentationDidChange: (() -> Void)?
 
     private(set) var appearance: PanelAppearance {
         didSet {
@@ -151,22 +162,15 @@ final class NotchSettings {
             updatePreferencesDidChange?()
         }
     }
-    var automaticallyDownloadsUpdates: Bool {
+    var automaticallyUpdates: Bool {
         didSet {
-            guard automaticallyDownloadsUpdates != oldValue else { return }
-            defaults.set(automaticallyDownloadsUpdates, forKey: "automaticallyDownloadsUpdates")
-            updatePreferencesDidChange?()
-        }
-    }
-    var automaticallyInstallsUpdates: Bool {
-        didSet {
-            guard automaticallyInstallsUpdates != oldValue else { return }
-            defaults.set(automaticallyInstallsUpdates, forKey: "automaticallyInstallsUpdates")
+            guard automaticallyUpdates != oldValue else { return }
+            defaults.set(automaticallyUpdates, forKey: "automaticallyUpdates")
             updatePreferencesDidChange?()
         }
     }
     var installsUpdatesOnQuit: Bool {
-        checksForUpdates && automaticallyDownloadsUpdates && automaticallyInstallsUpdates
+        checksForUpdates && automaticallyUpdates
     }
     var updateReadyToInstall = false
     var hoverEnabled: Bool { didSet { defaults.set(hoverEnabled, forKey: "hoverEnabled") } }
@@ -182,18 +186,43 @@ final class NotchSettings {
             interfaceSizeDidChange?()
         }
     }
+    private var gridIconSizeOverride: Double?
+    var gridIconSize: Double {
+        get { gridIconSizeOverride ?? Double(interfaceSize.grid.icon) }
+        set {
+            guard newValue.isFinite else { return }
+            let size = min(max(newValue, Self.gridIconSizes.lowerBound), Self.gridIconSizes.upperBound)
+            guard gridIconSizeOverride != size else { return }
+            gridIconSizeOverride = size
+            defaults.set(size, forKey: Self.gridIconSizeKey)
+        }
+    }
     var remembersSize: Bool { didSet { defaults.set(remembersSize, forKey: "remembersPanelSize") } }
     var startupFolder: StartupFolder { didSet { defaults.set(startupFolder.rawValue, forKey: "startupFolder") } }
     var customFolder: String { didSet { defaults.set(customFolder, forKey: "customStartupFolder") } }
-    var fileSort: FileSort { didSet { defaults.set(fileSort.rawValue, forKey: "defaultFileSort") } }
+    var fileSort: FileSort {
+        didSet {
+            defaults.set(fileSort.rawValue, forKey: "defaultFileSort")
+            if fileSort != oldValue { filePresentationDidChange?() }
+        }
+    }
     var foldersFirst: Bool { didSet { defaults.set(foldersFirst, forKey: "foldersFirst") } }
-    var groupsByAddedDate: Bool { didSet { defaults.set(groupsByAddedDate, forKey: "groupsByAddedDate") } }
+    var groupsByAddedDate: Bool {
+        didSet {
+            defaults.set(groupsByAddedDate, forKey: "groupsByAddedDate")
+            if groupsByAddedDate != oldValue { filePresentationDidChange?() }
+        }
+    }
     var cleansDiskImageAfterInstall: Bool { didSet { defaults.set(cleansDiskImageAfterInstall, forKey: "cleansDiskImageAfterInstall") } }
     var defaultDisplayMode: FileDisplayMode {
-        didSet { defaults.set(defaultDisplayMode.rawValue, forKey: "fileDisplayMode") }
+        didSet {
+            defaults.set(defaultDisplayMode.rawValue, forKey: "fileDisplayMode")
+            if defaultDisplayMode != oldValue { filePresentationDidChange?() }
+        }
     }
     private var locationDisplayModes: [String: FileDisplayMode]
     var showsClipboardInSidebar: Bool { didSet { defaults.set(showsClipboardInSidebar, forKey: "showsClipboardInSidebar") } }
+    var clipboardListWidth: Double? { didSet { defaults.set(clipboardListWidth, forKey: "clipboardListWidth") } }
     private var sidebarWidthOverride: Double? { didSet { defaults.set(sidebarWidthOverride, forKey: "sidebarWidth") } }
 
     var sidebarWidth: Double {
@@ -202,7 +231,7 @@ final class NotchSettings {
     }
 
     var panelPinned = false
-    var filterFocusRequest = 0
+    var searchRequest: PanelSearchRequest?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -210,8 +239,8 @@ final class NotchSettings {
         interfaceLanguage = defaults.string(forKey: "interfaceLanguage").flatMap(InterfaceLanguage.init(rawValue:)) ?? .system
         showsDockIcon = defaults.bool(forKey: "showsDockIcon")
         checksForUpdates = defaults.object(forKey: "checksForUpdates") as? Bool ?? true
-        automaticallyDownloadsUpdates = defaults.bool(forKey: "automaticallyDownloadsUpdates")
-        automaticallyInstallsUpdates = defaults.bool(forKey: "automaticallyInstallsUpdates")
+        automaticallyUpdates = defaults.object(forKey: "automaticallyUpdates") as? Bool
+            ?? (defaults.bool(forKey: "automaticallyDownloadsUpdates") && defaults.bool(forKey: "automaticallyInstallsUpdates"))
         hoverEnabled = defaults.object(forKey: "hoverEnabled") as? Bool ?? true
         hoverDelay = Self.delay(defaults.object(forKey: "hoverDelay"), fallback: 0.15)
         autoHide = defaults.object(forKey: "autoHide") as? Bool ?? true
@@ -227,6 +256,8 @@ final class NotchSettings {
             // The former large text size matches the new medium size.
             interfaceSize = previousSize == .large ? .medium : .small
         }
+        gridIconSizeOverride = (defaults.object(forKey: Self.gridIconSizeKey) as? Double)
+            .flatMap { Self.gridIconSizes.contains($0) ? $0 : nil }
         remembersSize = defaults.object(forKey: "remembersPanelSize") as? Bool ?? true
         startupFolder = defaults.string(forKey: "startupFolder").flatMap(StartupFolder.init(rawValue:)) ?? .home
         customFolder = defaults.string(forKey: "customStartupFolder") ?? ""
@@ -240,19 +271,42 @@ final class NotchSettings {
             ($0 as? String).flatMap(FileDisplayMode.init(rawValue:))
         } ?? [:]
         showsClipboardInSidebar = defaults.object(forKey: "showsClipboardInSidebar") as? Bool ?? true
+        clipboardListWidth = (defaults.object(forKey: "clipboardListWidth") as? Double)
+            .flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
         sidebarWidthOverride = (defaults.object(forKey: "sidebarWidth") as? Double)
             .flatMap { $0.isFinite ? Self.clampSidebarWidth($0) : nil }
     }
 
     func displayMode(for destination: FileBrowser.Destination) -> FileDisplayMode {
-        locationDisplayModes[destination.displayModeKey] ?? defaultDisplayMode
+        locationDisplayModes[destination.preferenceKey] ?? defaultDisplayMode
     }
 
     func setDisplayMode(_ mode: FileDisplayMode, for destination: FileBrowser.Destination) {
-        let key = destination.displayModeKey
+        let key = destination.preferenceKey
         guard locationDisplayModes[key] != mode else { return }
         locationDisplayModes[key] = mode
         defaults.set(locationDisplayModes.mapValues(\.rawValue), forKey: Self.locationDisplayModesKey)
+        filePresentationDidChange?()
+    }
+
+    func fileListColumnStorage(for destination: FileBrowser.Destination) -> AppStorage<TableColumnCustomization<FileEntry>> {
+        AppStorage(fileListColumnKey(for: destination), store: defaults)
+    }
+
+    private func fileListColumnKey(for destination: FileBrowser.Destination) -> String {
+        // Paths and tag names can contain dots, which UserDefaults observers treat as key paths.
+        let location = Data(destination.preferenceKey.utf8).base64EncodedString()
+        return "\(Self.sharedFileListColumnsKey)_\(location)"
+    }
+
+    func hasCustomFileListColumns(for destination: FileBrowser.Destination) -> Bool {
+        defaults.object(forKey: fileListColumnKey(for: destination)) != nil
+    }
+
+    func beginCustomizingFileListColumns(for destination: FileBrowser.Destination) {
+        guard !hasCustomFileListColumns(for: destination) else { return }
+        let shared = AppStorage<TableColumnCustomization<FileEntry>>(Self.sharedFileListColumnsKey, store: defaults)
+        fileListColumnStorage(for: destination).wrappedValue = shared.wrappedValue
     }
 
     func selectColorMode(_ mode: PanelTheme) { appearance.selectMode(mode) }

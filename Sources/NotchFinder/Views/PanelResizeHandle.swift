@@ -94,3 +94,17 @@ struct PanelResizeHandle: NSViewRepresentable {
         }
     }
 }
+
+extension View {
+    @ViewBuilder
+    func columnResizePointer() -> some View {
+        if #available(macOS 15, *) {
+            pointerStyle(.columnResize)
+        } else {
+            onHover { hovering in
+                let cursor: NSCursor = hovering ? .resizeLeftRight : .arrow
+                cursor.set()
+            }
+        }
+    }
+}

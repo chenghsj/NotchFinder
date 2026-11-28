@@ -22,8 +22,9 @@ struct AppVersion: Comparable {
 }
 
 struct GitHubRelease: Decodable {
+    static let repositoryURL = URL(string: "https://github.com/chenghsj/NotchFinder")!
     private static let apiURL = URL(string: "https://api.github.com/repos/chenghsj/NotchFinder/releases")!
-    private static let releasesURL = URL(string: "https://github.com/chenghsj/NotchFinder/releases")!
+    private static let releasesURL = repositoryURL.appending(component: "releases")
 
     static func isReleaseDMG(_ url: URL) -> Bool {
         url.scheme == "https" && url.host == "github.com" && url.port == nil

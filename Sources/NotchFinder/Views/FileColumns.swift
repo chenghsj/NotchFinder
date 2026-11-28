@@ -4,52 +4,52 @@ struct FileColumns: View {
     let browser: FileBrowser
     let listing: FileListing
     let settings: NotchSettings
+    let onFileDragEnded: () -> Void
 
-    private var columnWidth: CGFloat { 164 + 8 * (settings.interfaceSize.panelText - FileDisplaySize.small.panelText) }
+    private var defaultColumnWidth: CGFloat { 164 + 8 * (settings.interfaceSize.panelText - FileDisplaySize.small.panelText) }
 
     var body: some View {
         ScrollViewReader { scroll in
             ScrollView(.horizontal) {
                 HStack(spacing: 0) {
                     ForEach(listing.columns) { column in
-                        let id = column.id ?? browser.directory
-                        columnView(column)
-                            .frame(width: columnWidth)
-                            .id(id)
-                        Divider()
+                        let title = column.id.map(browser.name(for:)) ?? browser.title
+                        ResizableFileColumn(title: title, defaultWidth: defaultColumnWidth,
+                                            content: columnView(column).accessibilityLabel(title))
+                            .id(column.id.map(FileBrowser.Destination.folder) ?? browser.destination)
                     }
                 }
                 .frame(maxHeight: .infinity)
             }
+            // Leave room for the panel's outer resize handle when scrolled to the last column.
+            .padding(.trailing, 8)
             .onChange(of: browser.columnPath.last, initial: true) { _, folder in
-                scroll.scrollTo(folder ?? browser.directory, anchor: folder == nil ? .leading : .trailing)
+                scroll.scrollTo(folder.map(FileBrowser.Destination.folder) ?? browser.destination, anchor: folder == nil ? .leading : .trailing)
             }
         }
     }
 
     private func columnView(_ column: FileListing.Column) -> some View {
-        let ids = Set(column.entries.map(\.id))
         let selection = Binding(
-            get: { browser.selection.intersection(ids) },
+            get: { column.selected(from: browser.selection) },
             set: { browser.selectColumnItems($0, in: column.id) }
         )
-        let revealedFolder = column.id.flatMap { browser.columnPath.firstIndex(of: $0) }.map { $0 + 1 } ?? 0
-        let revealed = browser.columnPath.indices.contains(revealedFolder) ? browser.columnPath[revealedFolder] : nil
-
         return List(selection: selection) {
             ForEach(column.entries) { entry in
                 row(entry)
+                    .background(FileDragSource(entry: entry, entries: column.entries, browser: browser,
+                                               didEnd: onFileDragEnded,
+                                               selectOnPress: { browser.selectColumnItems([entry.id], in: column.id) }))
                     .tag(entry.id)
                     .itemProvider { NSItemProvider(object: entry.url as NSURL) }
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
-                    .listRowBackground(Color.accentColor.opacity(revealed == entry.id ? 0.13 : 0))
+                    .listRowBackground(Color.accentColor.opacity(column.revealedFolder == entry.id ? 0.13 : 0))
             }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(ColumnClickTarget { browser.selectColumnItems([], in: column.id) })
-        .accessibilityLabel(column.id.map(browser.name(for:)) ?? browser.title)
         .contextMenu(forSelectionType: URL.self) { items in
             FileCommands(browser: browser, items: items, cleanupInstaller: settings.cleansDiskImageAfterInstall)
         } primaryAction: { items in
@@ -80,7 +80,7 @@ struct FileColumns: View {
                 .truncationMode(.middle)
                 .help(entry.name)
             Spacer(minLength: 0)
-            if entry.canExpand && !browser.showsRecentItems {
+            if entry.canExpand {
                 Image(systemName: "chevron.forward")
                     .font(.system(size: max(8, size.panelIcon - 5), weight: .medium))
                     .foregroundStyle(.secondary)
@@ -88,6 +88,51 @@ struct FileColumns: View {
             }
         }
         .frame(minHeight: size.row.height)
+        .folderDrop(entry.canExpand ? entry.url : nil, browser: browser)
+    }
+}
+
+private struct ResizableFileColumn<Content: View>: View {
+    let title: String
+    let defaultWidth: CGFloat
+    let content: Content
+
+    @State private var widthOverride: CGFloat?
+    @GestureState private var dragOffset: CGFloat = 0
+
+    private var baseWidth: CGFloat { widthOverride ?? defaultWidth }
+    private var width: CGFloat { clampedWidth(baseWidth + dragOffset) }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            content.frame(width: width)
+
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(width: 1)
+                .frame(width: 7)
+                .contentShape(.rect)
+                .columnResizePointer()
+                .gesture(
+                    DragGesture(minimumDistance: 2, coordinateSpace: .global)
+                        .updating($dragOffset) { drag, offset, _ in offset = drag.translation.width }
+                        .onEnded { drag in widthOverride = clampedWidth(baseWidth + drag.translation.width) }
+                )
+                .accessibilityElement()
+                .accessibilityLabel(L10n.text("「%@」欄寬", title))
+                .accessibilityValue(L10n.text("%@ 點", String(Int(width.rounded()))))
+                .accessibilityAdjustableAction { direction in
+                    switch direction {
+                    case .increment: widthOverride = clampedWidth(width + 10)
+                    case .decrement: widthOverride = clampedWidth(width - 10)
+                    @unknown default: break
+                    }
+                }
+        }
+    }
+
+    private func clampedWidth(_ width: CGFloat) -> CGFloat {
+        min(480, max(112, width))
     }
 }
 

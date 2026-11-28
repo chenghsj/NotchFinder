@@ -12,14 +12,6 @@ struct AboutSettingsView: View {
             ?? "Notch Finder"
     }
 
-    private var version: String? {
-        guard let release = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else { return nil }
-        if let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String {
-            return L10n.text("版本 %@（組建 %@）", release, build)
-        }
-        return release
-    }
-
     var body: some View {
         Form {
             Section {
@@ -31,12 +23,14 @@ struct AboutSettingsView: View {
                         .accessibilityHidden(true)
                     Text(verbatim: appName)
                         .font(.title.weight(.semibold))
-                    if let version {
-                        Text(verbatim: version)
+                    if let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
+                        Text(L10n.text("版本 %@", version))
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                     }
+                    Link("GitHub", destination: GitHubRelease.repositoryURL)
+                        .font(.callout)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 18)

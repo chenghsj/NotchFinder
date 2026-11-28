@@ -1,7 +1,7 @@
 import ImageIO
 import SwiftUI
 
-struct ClipboardContentsView<FooterTools: View>: View {
+struct ClipboardContentsView: View {
     private enum Filter: CaseIterable {
         case all, text, images, files
 
@@ -24,17 +24,14 @@ struct ClipboardContentsView<FooterTools: View>: View {
 
     let rows: [ClipboardHistory.Row]
     let history: ClipboardHistory
-    let focusSearchRequest: Int
-    let pasteTargetName: String?
-    let canPasteFiles: Bool
+    let searchRequest: PanelSearchRequest?
     let interfaceSize: FileDisplaySize
-    var paste: (ClipboardHistory.Row) -> ClipboardPasteResult
-    @ViewBuilder let footerTools: FooterTools
+    @Binding var listWidth: Double?
+    let clipboardPaste: ClipboardPaste
     @State private var selectedID: ClipboardHistory.Row.ID?
-    @State private var feedbackID: ClipboardHistory.Row.ID?
-    @State private var feedback: String?
     @State private var query = ""
     @State private var filter: Filter = .all
+    @State private var showsSearch = true
     @FocusState private var searchFocused: Bool
 
     private var thumbnailSide: CGFloat { interfaceSize.row.icon + 4 }
@@ -48,27 +45,30 @@ struct ClipboardContentsView<FooterTools: View>: View {
             searchBar
             Divider()
             if history.isWaitingForAccess || history.storageFailed {
-                Label(history.storageFailed ? L10n.text("無法存取本機剪貼簿歷史") : L10n.text("允許剪貼簿存取後，即可自動更新內容。"),
-                      systemImage: "exclamationmark.circle")
-                    .font(.system(size: interfaceSize.panelText - 1))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 5)
+                HStack {
+                    Label(history.storageFailed ? L10n.text("無法存取本機剪貼簿歷史") : L10n.text("允許剪貼簿存取後，即可自動更新內容。"),
+                          systemImage: "exclamationmark.circle")
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    if history.isWaitingForAccess {
+                        Button(L10n.text("重新整理剪貼簿"), action: history.refreshPreview)
+                            .buttonStyle(.bordered)
+                    }
+                }
+                .font(.system(size: interfaceSize.panelText - 1))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
             }
             if let selected {
-                GeometryReader { geometry in
-                    HStack(spacing: 0) {
-                        historyList(visibleRows, selected: selected)
-                            .frame(width: min(280, max(122, geometry.size.width * 0.36)))
+                ClipboardSplitView(listWidth: $listWidth, textSize: interfaceSize.panelText) {
+                    historyList(visibleRows, selected: selected)
+                } preview: { paneWidth in
+                    VStack(spacing: 0) {
+                        previewActions(for: selected)
                         Divider()
-                        VStack(spacing: 0) {
-                            previewActions(for: selected)
-                            Divider()
-                            ClipboardItemPreview(row: selected, textSize: interfaceSize.panelText)
-                                .id(selected.id)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        }
+                        ClipboardItemPreview(row: selected, textSize: interfaceSize.panelText, paneWidth: paneWidth)
+                            .id(selected.id)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
             } else {
@@ -80,32 +80,28 @@ struct ClipboardContentsView<FooterTools: View>: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .font(.system(size: interfaceSize.panelText))
-        .onChange(of: focusSearchRequest) { _, _ in searchFocused = true }
-        .onChange(of: selected?.id) { _, id in
-            if feedbackID != id {
-                feedbackID = nil
-                feedback = nil
+        .onChange(of: searchRequest) { _, request in
+            guard let request else { return }
+            if request.action == .toggle && showsSearch {
+                searchFocused = false
+                query = ""
+                showsSearch = false
+            } else {
+                focusSearch()
             }
         }
+        .onChange(of: selected?.id) { _, id in clipboardPaste.clearFeedback(except: id) }
     }
 
     private var searchBar: some View {
         HStack(spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField(L10n.text("搜尋剪貼簿"), text: $query)
-                    .textFieldStyle(.plain)
-                    .focused($searchFocused)
-                if !query.isEmpty {
-                    Button(L10n.text("清除搜尋"), systemImage: "xmark.circle.fill") { query = "" }
-                        .labelStyle(.iconOnly)
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                }
+            if showsSearch {
+                searchField
+            } else {
+                Spacer(minLength: 0)
+                Button(L10n.text("搜尋剪貼簿"), systemImage: "magnifyingglass", action: focusSearch)
+                    .labelStyle(.iconOnly)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(.quaternary, in: .rect(cornerRadius: 7))
             Picker(L10n.text("類型"), selection: $filter) {
                 ForEach(Filter.allCases, id: \.self) { option in
                     Text(option.title).tag(option)
@@ -117,6 +113,29 @@ struct ClipboardContentsView<FooterTools: View>: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField(L10n.text("搜尋剪貼簿"), text: $query)
+                .textFieldStyle(.plain)
+                .focused($searchFocused)
+            if !query.isEmpty {
+                Button(L10n.text("清除搜尋"), systemImage: "xmark.circle.fill") { query = "" }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(.quaternary, in: .rect(cornerRadius: 7))
+    }
+
+    private func focusSearch() {
+        showsSearch = true
+        searchFocused = true
     }
 
     private func historyList(_ visibleRows: [ClipboardHistory.Row], selected: ClipboardHistory.Row) -> some View {
@@ -146,10 +165,11 @@ struct ClipboardContentsView<FooterTools: View>: View {
         }
         .contextMenu(forSelectionType: ClipboardHistory.Row.ID.self) { ids in
             if let row = visibleRows.first(where: { ids.contains($0.id) }) {
-                if canPaste(row) {
+                if let destination = clipboardPaste.destination(for: row) {
                     Button(L10n.text("貼上")) { use(row) }
+                        .disabled(!destination.isAvailable)
                 }
-                Button(L10n.text("複製")) { copy(row) }
+                Button(L10n.text("複製")) { clipboardPaste.copy(row) }
             }
         } primaryAction: { ids in
             if let row = visibleRows.first(where: { ids.contains($0.id) }) {
@@ -157,7 +177,7 @@ struct ClipboardContentsView<FooterTools: View>: View {
             }
         }
         .onKeyPress(.return) {
-            guard canPaste(selected) else { return .ignored }
+            guard clipboardPaste.destination(for: selected)?.isAvailable == true else { return .ignored }
             use(selected)
             return .handled
         }
@@ -182,52 +202,34 @@ struct ClipboardContentsView<FooterTools: View>: View {
         }
     }
 
-    private func canPaste(_ row: ClipboardHistory.Row) -> Bool {
-        row.contents.hasFiles ? canPasteFiles : pasteTargetName != nil
-    }
-
     private func use(_ row: ClipboardHistory.Row) {
         selectedID = row.id
-        guard canPaste(row) else {
-            copy(row)
-            return
-        }
-        feedbackID = row.id
-        switch paste(row) {
-        case .started: feedback = nil
-        case .copied: feedback = L10n.text("已複製，可用 ⌘V 貼上")
-        case .unavailable: feedback = L10n.text("無法貼上此項目")
-        }
-    }
-
-    private func copy(_ row: ClipboardHistory.Row) {
-        feedbackID = row.id
-        guard history.restore(row) != nil else {
-            feedback = L10n.text("無法複製此項目")
-            return
-        }
-        feedback = L10n.text("已複製")
+        Task { await clipboardPaste.paste(row, copyIfNoDestination: true) }
     }
 
     private func previewActions(for row: ClipboardHistory.Row) -> some View {
         VStack(alignment: .trailing, spacing: 5) {
             HStack(spacing: 8) {
-                Button(L10n.text("複製"), systemImage: "doc.on.doc") { copy(row) }
+                Button(L10n.text("複製"), systemImage: "doc.on.doc") { clipboardPaste.copy(row) }
                     .fixedSize()
 
-                if canPaste(row) {
-                    let title = row.contents.hasFiles ? L10n.text("貼到資料夾") : L10n.text("貼到 %@", String(describing: pasteTargetName ?? ""))
+                if let destination = clipboardPaste.destination(for: row) {
+                    let title = switch destination {
+                    case .folder: L10n.text("貼到資料夾")
+                    case .application(let name): L10n.text("貼到 %@", name)
+                    }
                     Button {
                         use(row)
                     } label: {
                         Text(title).lineLimit(1).truncationMode(.tail)
                     }
+                    .disabled(!destination.isAvailable)
                     .help(title)
                 }
             }
             .buttonStyle(.bordered)
 
-            if let feedback {
+            if let feedback = clipboardPaste.feedback(for: row.id)?.message {
                 Text(feedback)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -245,15 +247,77 @@ struct ClipboardContentsView<FooterTools: View>: View {
             Text(L10n.text("%@ 個項目", String(describing: count)))
                 .foregroundStyle(.secondary)
             Spacer(minLength: 0)
-            footerTools
         }
         .modifier(PanelFooterStyle(textSize: interfaceSize.panelText - 1))
+    }
+}
+
+private struct ClipboardSplitView<ListContent: View, Preview: View>: View {
+    @Binding var listWidth: Double?
+    let textSize: CGFloat
+    @ViewBuilder let list: ListContent
+    @ViewBuilder let preview: (CGFloat) -> Preview
+    @GestureState private var dragOffset = 0.0
+    private let dividerWidth: CGFloat = 7
+
+    var body: some View {
+        GeometryReader { geometry in
+            let available = max(0, Double(geometry.size.width - dividerWidth))
+            let minimum = min(122, available / 2)
+            let previewMinimum = max(180, Double(textSize) * 10)
+            let limits = minimum...max(minimum, available - previewMinimum)
+            let defaultWidth = min(280, max(122, available * 0.36))
+            let baseWidth = clampedListWidth(listWidth ?? defaultWidth, to: limits)
+            let width = clampedListWidth(baseWidth + dragOffset, to: limits)
+            let paneWidth = available - width
+
+            HStack(spacing: 0) {
+                list.frame(width: width)
+                divider(width: width, baseWidth: baseWidth, limits: limits)
+                preview(paneWidth).frame(width: paneWidth)
+            }
+        }
+    }
+
+    private func divider(width: Double, baseWidth: Double, limits: ClosedRange<Double>) -> some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor))
+            .frame(width: 1)
+            .frame(width: dividerWidth)
+            .contentShape(.rect)
+            .columnResizePointer()
+            .gesture(
+                DragGesture(minimumDistance: 2, coordinateSpace: .global)
+                    .updating($dragOffset) { drag, offset, _ in offset = Double(drag.translation.width) }
+                    .onEnded { drag in
+                        let adjusted = clampedListWidth(baseWidth + Double(drag.translation.width), to: limits)
+                        if adjusted != baseWidth { listWidth = adjusted }
+                    }
+            )
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(L10n.text("剪貼簿清單寬度"))
+            .accessibilityValue(L10n.text("%@ 點", String(describing: Int(width.rounded()))))
+            .accessibilityAdjustableAction { direction in
+                let adjusted: Double
+                switch direction {
+                case .increment: adjusted = clampedListWidth(width + 10, to: limits)
+                case .decrement: adjusted = clampedListWidth(width - 10, to: limits)
+                @unknown default: return
+                }
+                if adjusted != width { listWidth = adjusted }
+            }
+    }
+
+    private func clampedListWidth(_ width: Double, to limits: ClosedRange<Double>) -> Double {
+        min(limits.upperBound, max(limits.lowerBound, width))
     }
 }
 
 private struct ClipboardItemPreview: View {
     let row: ClipboardHistory.Row
     let textSize: CGFloat
+    let paneWidth: CGFloat
+    private let contentPadding: CGFloat = 12
 
     var body: some View {
         ScrollView {
@@ -286,7 +350,7 @@ private struct ClipboardItemPreview: View {
                     .background(.primary.opacity(0.045), in: .rect(cornerRadius: 7))
                 }
             }
-            .padding(12)
+            .padding(contentPadding)
         }
     }
 
@@ -309,10 +373,14 @@ private struct ClipboardItemPreview: View {
             }
         case .image(_, let data):
             if let image = ClipboardImage.thumbnail(data, maxPixels: 1000) {
+                // A legacy scrollbar narrows the image. Reserve its height using the full pane
+                // so showing the scrollbar cannot shrink the document enough to hide it again.
+                let width = max(0, paneWidth - 2 * contentPadding)
+                let height = min(240, width * CGFloat(image.height) / CGFloat(image.width))
                 Image(decorative: image, scale: 1)
                     .resizable()
                     .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: 240)
+                    .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
                     .clipShape(.rect(cornerRadius: 8))
                     .accessibilityLabel(L10n.text("剪貼簿圖片"))
             } else {

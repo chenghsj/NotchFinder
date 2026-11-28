@@ -16,6 +16,7 @@ struct FileGallery: View {
                         if entry.isFolder {
                             BrowserFileIcon(entry: entry, side: settings.interfaceSize.grid.icon * 1.5,
                                             loadsFileIcon: browser.fileIconsEnabled)
+                                .environment(\.quickLookSources, nil)
                                 .id(entry.id)
                         } else {
                             GalleryPreview(entry: entry)

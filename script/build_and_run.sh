@@ -10,8 +10,8 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${NOTCH_FINDER_BUILD_DIR:-$PROJECT_DIR}"
 CONFIGURATION="${NOTCH_FINDER_BUILD_CONFIGURATION:-debug}"
 SIGNING_IDENTITY="${NOTCH_FINDER_SIGNING_IDENTITY:-}"
-APP_VERSION="${NOTCH_FINDER_VERSION:-0.1.2}"
-BUILD_NUMBER="${NOTCH_FINDER_BUILD_NUMBER:-3}"
+APP_VERSION="${NOTCH_FINDER_VERSION:-0.1.3}"
+BUILD_NUMBER="${NOTCH_FINDER_BUILD_NUMBER:-4}"
 UPDATE_FEED="https://raw.githubusercontent.com/chenghsj/NotchFinder/main/updates/preview.xml"
 UPDATE_PUBLIC_KEY="$(cat "$PROJECT_DIR/updates/preview-public-key.txt")"
 APP_BUNDLE="$BUILD_DIR/dist/$APP_NAME.app"
@@ -127,7 +127,7 @@ SWIFT_BUILD=(swift build --package-path "$PROJECT_DIR" --scratch-path "$BUILD_DI
   --configuration "$CONFIGURATION" --sdk "$SDK_PATH"
   -Xlinker -platform_version -Xlinker macos -Xlinker "$MACOS_MIN_VERSION" -Xlinker "$SDK_VERSION")
 if [[ "$CONFIGURATION" == "release" ]]; then
-  SWIFT_BUILD+=(-debug-info-format dwarf)
+  SWIFT_BUILD+=(-debug-info-format dwarf -Xswiftc -Osize)
 fi
 if [[ "${NOTCH_FINDER_DISABLE_SWIFTPM_SANDBOX:-0}" == "1" ]]; then
   SWIFT_BUILD+=(--disable-sandbox)
@@ -145,6 +145,10 @@ SPARKLE_VERSION="$SPARKLE_FRAMEWORK/Versions/Current"
 
 if [[ "$CONFIGURATION" == "release" ]]; then
   /usr/bin/strip -S -x "$APP_BINARY"
+  # Headers and module maps are only needed when compiling against Sparkle.
+  for directory in Headers PrivateHeaders Modules; do
+    rm -rf -- "$SPARKLE_VERSION/$directory" "$SPARKLE_FRAMEWORK/$directory"
+  done
   APP_ARCHITECTURES="$(/usr/bin/lipo -archs "$APP_BINARY")"
   # Keep Sparkle's architecture slices aligned with single-architecture releases.
   if [[ "$APP_ARCHITECTURES" != *" "* ]]; then

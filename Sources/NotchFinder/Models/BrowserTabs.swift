@@ -10,29 +10,50 @@ final class BrowserTabs {
     }
 
     @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let settings: NotchSettings
+    @ObservationIgnored private let contentSource: BrowserContentRefresh.Source
+    @ObservationIgnored private let fileHistory: FileOperationHistory
     let clipboardHistory: ClipboardHistory
+    @ObservationIgnored private var pendingOperationMessage: String?
     @ObservationIgnored private var isPanelVisible = false
     private(set) var items: [Tab]
     private(set) var active: Tab
     private(set) var showsClipboard = false
-    @ObservationIgnored var onActivate: (() -> Void)?
+    @ObservationIgnored var onLeaveFileContent: (() -> Void)?
 
-    init(initialDirectory: URL?, defaults: UserDefaults = .standard, clipboardHistory: ClipboardHistory) {
-        self.defaults = defaults
+    init(initialDirectory: URL?, settings: NotchSettings, clipboardHistory: ClipboardHistory,
+         contentSource: BrowserContentRefresh.Source = .live, sidebar: SidebarLocations? = nil) {
+        self.settings = settings
+        self.contentSource = contentSource
+        defaults = settings.defaults
         self.clipboardHistory = clipboardHistory
-        let tab = Tab(browser: FileBrowser(initialDirectory: initialDirectory, defaults: defaults))
+        let fileHistory = FileOperationHistory()
+        self.fileHistory = fileHistory
+        let tab = Tab(browser: FileBrowser(initialDirectory: initialDirectory, sidebar: sidebar, settings: settings,
+                                           contentSource: contentSource, fileHistory: fileHistory))
         items = [tab]
         active = tab
         trackLocation(of: tab.browser)
+        fileHistory.deliver = { [weak self] result in
+            guard let self else { return }
+            if isPanelVisible && !showsClipboard {
+                active.browser.receive(result)
+            } else {
+                pendingOperationMessage = result.message
+                active.browser.showOperationMessage(result.message)
+            }
+        }
+        settings.filePresentationDidChange = { [weak self] in
+            self?.items.forEach { $0.browser.filePresentationDidChange() }
+        }
     }
 
     func setPanelVisible(_ visible: Bool) {
         guard isPanelVisible != visible else { return }
         isPanelVisible = visible
-        updateMonitoring()
+        updateActiveContent(revalidation: .immediately)
         if visible {
             if showsClipboard { clipboardHistory.sample() }
-            else { active.browser.reload() }
             rememberLocation()
         } else {
             active.browser.cancelEditing()
@@ -41,9 +62,10 @@ final class BrowserTabs {
 
     func showClipboard() {
         if !showsClipboard {
+            onLeaveFileContent?()
             active.browser.cancelEditing()
             showsClipboard = true
-            updateMonitoring()
+            updateActiveContent(revalidation: .quietly)
             rememberLocation()
         }
         if isPanelVisible { clipboardHistory.refreshPreview() }
@@ -61,6 +83,10 @@ final class BrowserTabs {
         browse { $0.showRecentItems() }
     }
 
+    func showTag(_ name: String) {
+        browse { $0.showTag(name) }
+    }
+
     func goForward() {
         browse { $0.goForward() }
     }
@@ -71,7 +97,7 @@ final class BrowserTabs {
 
     func add() {
         let browser = FileBrowser(initialDirectory: active.browser.directory, sidebar: active.browser.sidebar,
-                                  defaults: defaults)
+                                  settings: settings, contentSource: contentSource, fileHistory: fileHistory)
         browser.onPreview = active.browser.onPreview
         trackLocation(of: browser)
         let tab = Tab(browser: browser)
@@ -100,13 +126,13 @@ final class BrowserTabs {
     }
 
     private func activate(_ tab: Tab) {
-        onActivate?()
-        active.browser.setContentMonitoring(false)
+        onLeaveFileContent?()
+        active.browser.setContentActive(false, revalidation: .afterDelay)
         active.browser.cancelEditing()
         showsClipboard = false
         active = tab
-        updateMonitoring()
-        tab.browser.activate()
+        updateActiveContent(revalidation: .afterDelay)
+        tab.browser.enableFileIcons()
         rememberLocation()
     }
 
@@ -116,19 +142,20 @@ final class BrowserTabs {
             change(browser)
             return
         }
-        let previousDestination = browser.destination
         showsClipboard = false
-        updateMonitoring()
+        updateActiveContent(revalidation: .quietly)
         change(browser)
-        if isPanelVisible, previousDestination == browser.destination {
-            browser.reload(quietly: true)
-        }
         rememberLocation()
     }
 
-    private func updateMonitoring() {
+    private func updateActiveContent(revalidation: BrowserContentRefresh.Revalidation) {
         clipboardHistory.setPreviewVisible(isPanelVisible && showsClipboard)
-        active.browser.setContentMonitoring(isPanelVisible && !showsClipboard)
+        let browsing = isPanelVisible && !showsClipboard
+        active.browser.setContentActive(browsing, revalidation: revalidation)
+        if browsing, let message = pendingOperationMessage {
+            pendingOperationMessage = nil
+            active.browser.showOperationMessage(message)
+        }
     }
 
     private func trackLocation(of browser: FileBrowser) {

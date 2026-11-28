@@ -4,20 +4,22 @@
 
 Browse files, preview documents with Quick Look, and reuse clipboard items from a panel that opens beneath your MacBook’s notch.
 
+<a href="docs/notch-finder-cut-en.mp4"><img src="docs/notch-finder-preview.gif" alt="Demo of the file panel opening beneath the notch and retracting when the pointer moves away (1080p MP4)." width="560"></a>
+
 Requires macOS 14 Sonoma or later. A notch is optional. The interface is available in English, Traditional Chinese, Simplified Chinese, and Japanese.
 
 ## Install
 
 The prebuilt DMG requires an Apple Silicon Mac running macOS 14 Sonoma or later.
 
-Download the `.dmg` from **Assets**, then open it in Finder. [Latest release](https://github.com/chenghsj/NotchFinder/releases/latest)
+[Download the latest DMG for Apple Silicon](https://github.com/chenghsj/NotchFinder/releases/latest/download/NotchFinder-arm64.dmg) and open it in Finder.
 
-To download and open the `v0.1.2` DMG from Terminal, run the following.
+You can also download and open the latest DMG from Terminal.
 
 ```sh
-dmg="$HOME/Downloads/NotchFinder-0.1.2-arm64.dmg"
+dmg="$HOME/Downloads/NotchFinder-arm64.dmg"
 curl -fL -o "$dmg" \
-  "https://github.com/chenghsj/NotchFinder/releases/download/v0.1.2/NotchFinder-0.1.2-arm64.dmg" &&
+  "https://github.com/chenghsj/NotchFinder/releases/latest/download/NotchFinder-arm64.dmg" &&
   open "$dmg"
 ```
 
@@ -33,7 +35,9 @@ The app uses an ad hoc signature. If macOS displays a verification warning, conf
 
 ### Software updates
 
-When upgrading from v0.1.1 or earlier, install the DMG manually once to get in-app updates. In **Settings → General → Software Updates**, enable automatic checking and downloading, then enable **Automatically Install Updates** to install a verified update the next time you quit Notch Finder. With automatic installation turned off, automatic downloads go to Downloads.
+Choose **Check for Updates…** from the menu bar icon or **Settings → General → Software Updates**. When a new version is available, choose **Install Update** to download it in the app, then **Install and Relaunch** when it is ready. Choose **Later** to pause background reminders for that build for 24 hours. You can still check manually at any time.
+
+Enable **Automatically Check for Updates** to receive update notifications. Notch Finder checks at launch and daily, and retries after 15 minutes if the network is temporarily unavailable. Enable **Automatically Download and Install Updates** to download and verify updates in the background and install them when you quit Notch Finder. When upgrading from v0.1.1 or earlier, install the DMG manually once to get in-app updates.
 
 ## Features
 
@@ -67,8 +71,8 @@ Release builds archive the app's dSYM separately in `dist/symbols/`. Keep the dS
 ### Prepare a signed update
 
 1. Run `./script/build_and_run.sh --build` with `NOTCH_FINDER_BUILD_CONFIGURATION=release`, the release version in `NOTCH_FINDER_VERSION`, and a `NOTCH_FINDER_BUILD_NUMBER` higher than the last published build. Name the packaged DMG `NotchFinder-VERSION-arm64.dmg` for an Apple Silicon build.
-2. From the release maintainer's Mac, run `SPARKLE_BIN_DIR=/path/to/sparkle/bin bash script/sign_preview_update.sh dist/NotchFinder-VERSION-arm64.dmg`. Use the signing tools from the pinned Sparkle release. The script uses the `local.notchfinder.preview` key in the login Keychain and produces the detached DMG signature and the signed `updates/preview.xml` feed.
-3. Publish the DMG and its `.sig` file together in the matching GitHub Release. Once both assets are publicly available, publish the generated `updates/preview.xml` on `main`.
+2. From the release maintainer's Mac, run `SPARKLE_BIN_DIR=/path/to/sparkle/bin bash script/sign_preview_update.sh dist/NotchFinder-VERSION-arm64.dmg`. Use the signing tools from the pinned Sparkle release. The script verifies the published feed on GitHub and checks the build inside the DMG against its highest build number. It then uses the `local.notchfinder.preview` key in the login Keychain to sign the DMG and the new `updates/preview.xml` feed.
+3. Create a draft GitHub Release for the matching tag. Run the upload command printed by the signing script to attach the versioned DMG, its `.sig` file, and the identical `NotchFinder-arm64.dmg` used by the latest download link. Publish the release, then publish the generated `updates/preview.xml` on `main`.
 
 ### Symbolicate a crash report
 
@@ -95,11 +99,14 @@ To quit Notch Finder, choose **Quit Notch Finder** from **Settings → General**
 | Action | Default shortcut |
 | --- | --- |
 | Toggle the panel from any app | `⌃⌥N` |
+| Show or hide the clipboard from any app | `⌃⌥V` |
 | Pin or unpin the panel | `⌘⇧P` |
-| Search the current file or clipboard view | `⌘F` or `⌘K` |
+| Open or focus search in the current file or clipboard view | `⌘F` |
+| Show or hide search in the current file or clipboard view | `⌘K` |
 | Quick Look | `Space` |
 | New tab / Close tab | `⌘T` / `⌘W` |
 | Next tab / Previous tab | `⌃⇥` / `⌃⇧⇥` |
+| Undo / Redo a file operation | `⌘Z` / `⇧⌘Z` |
 | Go to Folder | `⌘⇧G` |
 | Open Settings | `⌘,` |
 
@@ -128,3 +135,7 @@ Run `./script/build_and_run.sh --verify` to check that a test copy launches and 
 Test copies skip the menu bar icon so macOS does not keep an entry for each temporary app in System Settings.
 
 See the [feature specification and manual testing checklist](docs/notch-finder-spec.md) (Traditional Chinese).
+
+## License
+
+Notch Finder is licensed under the [MIT License](LICENSE).

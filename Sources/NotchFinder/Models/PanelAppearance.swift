@@ -176,8 +176,8 @@ struct PanelStylePreset: RawRepresentable, Hashable, Identifiable {
                                dark: Palette(surface: 0x18242B, ink: 0xEEEEEE, accent: 0x008784, windowOverride: 0x1F2D33))
 
     // Theme names and light/dark palette values from the Codex 26.1120.50957 catalog.
-    static let allCases: [Self] = [
-        .native, .sandstone, .seaGlass,
+    static let allCases: [Self] = [.native] + [
+        .sandstone, .seaGlass,
         Self("absolutely", "Absolutely",
              light: Palette(surface: 0xF9F9F7, ink: 0x2D2D2B, accent: 0xCC7D5E),
              dark: Palette(surface: 0x2D2D2B, ink: 0xF9F9F7, accent: 0xCC7D5E)),
@@ -251,7 +251,7 @@ struct PanelStylePreset: RawRepresentable, Hashable, Identifiable {
         Self("xcode", "Xcode",
              light: Palette(surface: 0xFFFFFF, ink: 0x000000, accent: 0x0E0EFF),
              dark: Palette(surface: 0x1F1F24, ink: 0xFFFFFF, accent: 0x5482FF)),
-    ]
+    ].sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
 }
 
 enum PanelFontStyle: String, CaseIterable {

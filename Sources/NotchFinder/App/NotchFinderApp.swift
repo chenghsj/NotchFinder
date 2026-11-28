@@ -13,13 +13,14 @@ enum NotchFinderApp {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let settings = NotchSettings()
     private let shortcuts = PanelShortcuts()
     private lazy var controller = NotchController(settings: settings, shortcuts: shortcuts)
-    private lazy var preferences = PreferencesWindowController(settings: settings, shortcuts: shortcuts, controller: controller)
     private lazy var updates = AppUpdates(settings: settings)
-    private var globalHotKey: PanelGlobalHotKey?
+    private lazy var preferences = PreferencesWindowController(settings: settings, shortcuts: shortcuts,
+                                                              controller: controller, updates: updates)
+    private var globalHotKeys: PanelGlobalHotKeys?
     private var settingsMenuItems: [NSMenuItem] = []
     private var localizedMenuItems: [(item: NSMenuItem, key: String)] = []
     private var statusItem: NSStatusItem?
@@ -53,14 +54,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             configureStatusItem()
         }
 
-        let globalHotKey = PanelGlobalHotKey { [weak self] in
-            guard let self, !self.preferences.isRecording else { return }
-            self.controller.togglePanel()
+        let globalHotKeys = PanelGlobalHotKeys { [weak self] command in
+            guard let self else { return }
+            if self.preferences.isRecording {
+                self.shortcuts.capture(self.shortcuts[command])
+                return
+            }
+            switch command {
+            case .togglePanel: self.controller.togglePanel()
+            case .openClipboard: self.controller.toggleClipboard()
+            default: break
+            }
         }
-        self.globalHotKey = globalHotKey
-        shortcuts.installGlobal = { [weak globalHotKey] in globalHotKey?.replace(with: $0) == true }
+        self.globalHotKeys = globalHotKeys
+        shortcuts.installGlobals = { [weak globalHotKeys] in globalHotKeys?.update($0) == true }
         shortcuts.settingsShortcutChanged = { [weak self] in self?.updatePreferencesKey($0) }
-        shortcuts.installInitialGlobal()
+        shortcuts.installInitialGlobals()
         updatePreferencesKey(shortcuts[.settings])
 
         controller.start()
@@ -88,7 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         updates.stop()
         controller.clipboardHistory.finishSaving()
-        globalHotKey?.stop()
+        globalHotKeys?.stop()
     }
 
     private func configureStatusItem() {
@@ -104,6 +113,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         preferencesItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         preferencesItem.image?.isTemplate = true
         statusMenu.addItem(.separator())
+        addAboutAndUpdateItems(to: statusMenu)
+        statusMenu.addItem(.separator())
         addLocalizedItem("結束 Notch Finder", to: statusMenu, action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem = item
     }
@@ -112,12 +123,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let main = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu(title: "Notch Finder")
+        addAboutAndUpdateItems(to: appMenu)
+        appMenu.addItem(.separator())
         addPreferencesItem(to: appMenu)
         appMenu.addItem(.separator())
         addLocalizedItem("結束 Notch Finder", to: appMenu, action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         main.addItem(appItem)
         NSApp.mainMenu = main
+    }
+
+    private func addAboutAndUpdateItems(to menu: NSMenu) {
+        addLocalizedItem("關於 Notch Finder", to: menu, action: #selector(showAbout)).target = self
+        addLocalizedItem("檢查更新…", to: menu, action: #selector(checkForUpdates)).target = self
     }
 
     @discardableResult
@@ -149,6 +167,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard menuItem.action == #selector(checkForUpdates) else { return true }
+        menuItem.title = updates.manualCheckTitle
+        return !updates.manualCheckUnavailable
+    }
+
     @objc private func handleStatusClick(_ button: NSStatusBarButton) {
         if NSApp.currentEvent?.modifierFlags.contains(.option) == true {
             openPreferences()
@@ -163,6 +187,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openPreferences() {
         preferences.show()
+    }
+
+    @objc private func checkForUpdates() {
+        updates.checkManually()
+    }
+
+    @objc private func showAbout() {
+        let bundle = Bundle.main
+        let credits = NSMutableAttributedString(string: "GitHub", attributes: [.link: GitHubRelease.repositoryURL])
+        if let minimum = bundle.object(forInfoDictionaryKey: "LSMinimumSystemVersion") as? String {
+            credits.append(NSAttributedString(string: "\n" + L10n.text("macOS %@ 或更新版本", minimum)))
+        }
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        credits.addAttributes([.paragraphStyle: paragraph, .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)],
+                              range: NSRange(location: 0, length: credits.length))
+
+        NSApp.activate()
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationIcon: NSWorkspace.shared.icon(forFile: bundle.bundlePath),
+            .version: "",
+            .credits: credits
+        ])
     }
 
     @objc private func showPanel() {

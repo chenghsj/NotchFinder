@@ -5,28 +5,141 @@ import Testing
 @testable import NotchFinder
 
 struct GitHubReleaseTests {
-    @Test @MainActor func updatePreferencesPersistAndDownloadsAreOptIn() throws {
+    @Test func laterRemembersOnlyTheSelectedBuildUntilItsDeadline() throws {
+        let domain = "NotchFinderTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        let day: TimeInterval = 24 * 60 * 60
+        let schedule = UpdateSchedule(defaults: defaults)
+        defaults.set("v0.1.2", forKey: "lastNotifiedUpdateTag")
+        #expect(!schedule.isDeferred("3", now: now))
+        schedule.remindLater(about: "3", now: now)
+
+        let reloaded = UpdateSchedule(defaults: try #require(UserDefaults(suiteName: domain)))
+        #expect(!reloaded.isDeferred("4", now: now))
+        #expect(reloaded.isDeferred("3", now: now.addingTimeInterval(day - 1)))
+        #expect(reloaded.nextCheckDelay(after: nil, now: now.addingTimeInterval(day - 1)) == 1)
+        #expect(!reloaded.isDeferred("3", now: now.addingTimeInterval(day)))
+        #expect(reloaded.nextCheckDelay(after: nil, now: now.addingTimeInterval(day)) == day)
+    }
+
+    @Test func transientNetworkFailuresRetryThenReturnToDailyChecks() throws {
+        let domain = "NotchFinderTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let schedule = UpdateSchedule(defaults: defaults)
+        let day: TimeInterval = 24 * 60 * 60
+        let offline = NSError(domain: "SUSparkleErrorDomain", code: 2001,
+                              userInfo: [NSUnderlyingErrorKey: URLError(.notConnectedToInternet)])
+        #expect(schedule.nextCheckDelay(after: offline) == 15 * 60)
+        #expect(schedule.nextCheckDelay(after: URLError(.timedOut)) == 15 * 60)
+        #expect(schedule.nextCheckDelay(after: nil) == day)
+        #expect(schedule.nextCheckDelay(after: URLError(.cancelled)) == day)
+        #expect(schedule.nextCheckDelay(after: URLError(.serverCertificateUntrusted)) == day)
+        #expect(schedule.nextCheckDelay(after: NSError(domain: "SUSparkleErrorDomain", code: 3001)) == day)
+    }
+
+    @Test @MainActor func updatePreferencesPersistAndAutomaticUpdatesAreOptIn() throws {
         let domain = "NotchFinderTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: domain))
         defer { defaults.removePersistentDomain(forName: domain) }
         let settings = NotchSettings(defaults: defaults)
 
         #expect(settings.checksForUpdates)
-        #expect(!settings.automaticallyDownloadsUpdates)
-        #expect(!settings.automaticallyInstallsUpdates)
+        #expect(!settings.automaticallyUpdates)
         settings.checksForUpdates = false
-        settings.automaticallyDownloadsUpdates = true
-        settings.automaticallyInstallsUpdates = true
+        settings.automaticallyUpdates = true
 
         let reloaded = NotchSettings(defaults: defaults)
         #expect(!reloaded.checksForUpdates)
-        #expect(reloaded.automaticallyDownloadsUpdates)
-        #expect(reloaded.automaticallyInstallsUpdates)
+        #expect(reloaded.automaticallyUpdates)
         #expect(!reloaded.installsUpdatesOnQuit)
         reloaded.checksForUpdates = true
         #expect(reloaded.installsUpdatesOnQuit)
-        reloaded.automaticallyDownloadsUpdates = false
+        reloaded.automaticallyUpdates = false
         #expect(!reloaded.installsUpdatesOnQuit)
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    @MainActor func automaticUpdatesMigrateLegacyPreferences(downloads: Bool, installs: Bool) throws {
+        let domain = "NotchFinderTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        defaults.set(downloads, forKey: "automaticallyDownloadsUpdates")
+        defaults.set(installs, forKey: "automaticallyInstallsUpdates")
+
+        let settings = NotchSettings(defaults: defaults)
+        #expect(settings.automaticallyUpdates == (downloads && installs))
+        settings.automaticallyUpdates = true
+        settings.automaticallyUpdates = false
+        #expect(!NotchSettings(defaults: defaults).automaticallyUpdates)
+    }
+
+    @Test @MainActor func automaticUpdateCancelsDownloadAndRetriesAfterReenable() {
+        var cancelled = 0
+        var checks = 0
+        let lifecycle = AutomaticUpdateLifecycle { _ in }
+        lifecycle.setEnabled(true)
+        lifecycle.check { checks += 1 }
+        lifecycle.didStartDownload { cancelled += 1 }
+        lifecycle.setEnabled(false)
+        lifecycle.setEnabled(false)
+        #expect(cancelled == 1)
+        #expect(!lifecycle.acceptsUpdate)
+
+        lifecycle.setEnabled(true)
+        lifecycle.check { checks += 1 }
+        #expect(checks == 1)
+        lifecycle.didFinish()
+        #expect(checks == 2)
+        #expect(lifecycle.acceptsUpdate)
+    }
+
+    @Test @MainActor func automaticUpdateWaitsForExtractionCancellationBeforeQuitting() {
+        var skipped = 0
+        var quitReplies = 0
+        var repeatedCheck = false
+        let lifecycle = AutomaticUpdateLifecycle { _ in }
+        lifecycle.setEnabled(true)
+        lifecycle.didStartExtraction()
+        lifecycle.setEnabled(false)
+        lifecycle.setEnabled(true)
+        lifecycle.check { repeatedCheck = true }
+        #expect(lifecycle.deferQuitForCancellation { quitReplies += 1 })
+        lifecycle.readyToInstall(install: { Issue.record("Cancelled update was installed") }, skip: { skipped += 1 })
+        #expect(skipped == 1)
+        #expect(quitReplies == 0)
+        lifecycle.didFinish()
+        lifecycle.didFinish()
+        #expect(quitReplies == 1)
+        #expect(!repeatedCheck)
+    }
+
+    @Test @MainActor func optingOutSkipsAnAlreadyPreparedUpdate() {
+        var ready = false
+        var skipped = 0
+        let lifecycle = AutomaticUpdateLifecycle { ready = $0 }
+        lifecycle.setEnabled(true)
+        lifecycle.readyToInstall(install: { Issue.record("Opted-out update was installed") }, skip: { skipped += 1 })
+        #expect(ready)
+        #expect(!lifecycle.deferQuitForCancellation {})
+        lifecycle.setEnabled(false)
+        #expect(!ready)
+        #expect(skipped == 1)
+    }
+
+    @Test @MainActor func manuallyInstallingPreparedUpdateRepliesOnlyOnce() {
+        var ready = false
+        var installed = 0
+        let lifecycle = AutomaticUpdateLifecycle { ready = $0 }
+        lifecycle.setEnabled(true)
+        lifecycle.readyToInstall(install: { installed += 1 }, skip: { Issue.record("Confirmed update was skipped") })
+        lifecycle.installNow()
+        lifecycle.installNow()
+        lifecycle.setEnabled(false)
+        #expect(installed == 1)
+        #expect(!ready)
     }
 
     @Test func updateDMGMustMatchTheEmbeddedEdDSAKey() throws {

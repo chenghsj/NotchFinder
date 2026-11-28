@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: Test and build on macOS
+    runs-on: xcode-27
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Swift tests
+        run: swift test
+
+      - name: Build app bundle
+        env:
+          NOTCH_FINDER_SIGNING_IDENTITY: '-'
+        run: ./script/build_and_run.sh --build

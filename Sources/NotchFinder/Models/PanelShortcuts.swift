@@ -65,9 +65,14 @@ struct KeyShortcut: Codable, Equatable {
 }
 
 enum PanelCommand: String, CaseIterable {
-    case togglePanel, settings, close, pin, back, forward, parent, goToFolder, filter, reload, toggleHidden
+    case togglePanel, openClipboard, settings, close, pin, back, forward, parent, goToFolder, filter, reload, toggleHidden
     case open, preview, selectAll, copy, paste, copyPath, reveal, rename, newFolder, trash
     case newTab, closeTab, nextTab, previousTab
+    case undo, redo
+
+    static let globalCommands: [Self] = [.togglePanel, .openClipboard]
+
+    var isGlobal: Bool { Self.globalCommands.contains(self) }
 
     var isTabCommand: Bool {
         switch self {
@@ -79,6 +84,7 @@ enum PanelCommand: String, CaseIterable {
     var title: String {
         switch self {
         case .togglePanel: L10n.text("開關檔案面板（全域）")
+        case .openClipboard: L10n.text("開關剪貼簿（全域）")
         case .settings: L10n.text("開啟設定")
         case .close: L10n.text("收合面板或取消")
         case .pin: L10n.text("固定或解除固定面板")
@@ -103,12 +109,15 @@ enum PanelCommand: String, CaseIterable {
         case .closeTab: L10n.text("關閉目前分頁")
         case .nextTab: L10n.text("下一個分頁")
         case .previousTab: L10n.text("上一個分頁")
+        case .undo: L10n.text("復原檔案操作")
+        case .redo: L10n.text("重做檔案操作")
         }
     }
 
     var defaultShortcut: KeyShortcut {
         switch self {
         case .togglePanel: KeyShortcut(kVK_ANSI_N, "n", [.control, .option])
+        case .openClipboard: KeyShortcut(kVK_ANSI_V, "v", [.control, .option])
         case .settings: KeyShortcut(kVK_ANSI_Comma, ",", .command)
         case .close: KeyShortcut(kVK_Escape, "\u{1b}")
         case .pin: KeyShortcut(kVK_ANSI_P, "p", [.command, .shift])
@@ -133,6 +142,8 @@ enum PanelCommand: String, CaseIterable {
         case .closeTab: KeyShortcut(kVK_ANSI_W, "w", .command)
         case .nextTab: KeyShortcut(kVK_Tab, "\t", .control)
         case .previousTab: KeyShortcut(kVK_Tab, "\t", [.control, .shift])
+        case .undo: KeyShortcut(kVK_ANSI_Z, "z", .command)
+        case .redo: KeyShortcut(kVK_ANSI_Z, "z", [.command, .shift])
         }
     }
 }
@@ -140,15 +151,16 @@ enum PanelCommand: String, CaseIterable {
 @MainActor
 @Observable
 final class PanelShortcuts {
-    private static let searchShortcut = KeyShortcut(kVK_ANSI_K, "k", .command)
+    private static let searchToggleShortcut = KeyShortcut(kVK_ANSI_K, "k", .command)
 
     @ObservationIgnored private let defaults: UserDefaults
-    @ObservationIgnored var installGlobal: ((KeyShortcut) -> Bool)?
+    @ObservationIgnored var installGlobals: (([PanelCommand: KeyShortcut]) -> Bool)?
     @ObservationIgnored var settingsShortcutChanged: ((KeyShortcut) -> Void)?
     private var assigned: [String: KeyShortcut]
     private(set) var recording: PanelCommand?
     private(set) var error: String?
-    private(set) var globalAvailable = true
+    private var unavailableGlobals: Set<PanelCommand> = []
+    var globalAvailable: Bool { unavailableGlobals.isEmpty }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -165,31 +177,44 @@ final class PanelShortcuts {
 
     func cancelRecording() { recording = nil }
 
-    func installInitialGlobal() {
-        globalAvailable = installGlobal?(self[.togglePanel]) ?? false
+    func installInitialGlobals() {
+        unavailableGlobals = Set(PanelCommand.globalCommands.filter { command in
+            let shortcut = self[command]
+            // An existing binding takes precedence over the new clipboard default.
+            if command == .openClipboard && conflict(for: shortcut, excluding: command) != nil { return true }
+            return installGlobals?([command: shortcut]) != true
+        })
     }
 
     func command(for event: NSEvent) -> PanelCommand? {
         guard event.type == .keyDown else { return nil }
-        if let command = PanelCommand.allCases.first(where: { $0 != .togglePanel && self[$0].matches(event) }) {
+        if let command = PanelCommand.allCases.first(where: { !$0.isGlobal && self[$0].matches(event) }) {
             return command
         }
-        return Self.searchShortcut.matches(event) ? .filter : nil
+        return isSearchToggle(event) ? .filter : nil
+    }
+
+    func isSearchToggle(_ event: NSEvent) -> Bool {
+        Self.searchToggleShortcut.matches(event)
     }
 
     func capture(_ event: NSEvent) -> Bool {
-        guard let recording, event.type == .keyDown else { return false }
+        guard recording != nil, event.type == .keyDown else { return false }
         if Int(event.keyCode) == kVK_Escape {
             cancelRecording()
-        } else if let shortcut = KeyShortcut(event: event), assign(shortcut, to: recording) {
-            cancelRecording()
+        } else if let shortcut = KeyShortcut(event: event) {
+            capture(shortcut)
         }
         return true
     }
 
+    func capture(_ shortcut: KeyShortcut) {
+        if let recording, assign(shortcut, to: recording) { cancelRecording() }
+    }
+
     @discardableResult
     func assign(_ shortcut: KeyShortcut, to command: PanelCommand) -> Bool {
-        if let conflict = PanelCommand.allCases.first(where: { $0 != command && self[$0].matches(shortcut) }) {
+        if let conflict = conflict(for: shortcut, excluding: command) {
             error = L10n.text("%@ 已綁定「%@」", String(describing: shortcut.display), String(describing: conflict.title))
             return false
         }
@@ -201,18 +226,24 @@ final class PanelShortcuts {
             error = L10n.text("開啟設定的快捷鍵需包含 ⌘")
             return false
         }
-        if command == .togglePanel {
+        if command.isGlobal {
             guard !shortcut.modifiers.intersection([.command, .option, .control]).isEmpty else {
                 error = L10n.text("全域快捷鍵需包含 ⌘、⌥ 或 ⌃")
                 return false
             }
-            guard installGlobal?(shortcut) == true else {
+            guard installGlobals?([command: shortcut]) == true else {
                 error = L10n.text("macOS 無法註冊 %@，請試另一組按鍵", String(describing: shortcut.display))
                 return false
             }
-            globalAvailable = true
+            unavailableGlobals.remove(command)
         }
         assigned[command.rawValue] = shortcut
+        for pending in unavailableGlobals {
+            let binding = self[pending]
+            if conflict(for: binding, excluding: pending) == nil, installGlobals?([pending: binding]) == true {
+                unavailableGlobals.remove(pending)
+            }
+        }
         persist()
         if command == .settings { settingsShortcutChanged?(shortcut) }
         error = nil
@@ -220,16 +251,21 @@ final class PanelShortcuts {
     }
 
     func reset() {
-        guard installGlobal?(PanelCommand.togglePanel.defaultShortcut) == true else {
+        let defaults = Dictionary(uniqueKeysWithValues: PanelCommand.globalCommands.map { ($0, $0.defaultShortcut) })
+        guard installGlobals?(defaults) == true else {
             error = L10n.text("預設的全域快捷鍵無法註冊")
             return
         }
         assigned = [:]
-        globalAvailable = true
+        unavailableGlobals.removeAll()
         error = nil
         recording = nil
         persist()
         settingsShortcutChanged?(self[.settings])
+    }
+
+    private func conflict(for shortcut: KeyShortcut, excluding command: PanelCommand) -> PanelCommand? {
+        PanelCommand.allCases.first { $0 != command && self[$0].matches(shortcut) }
     }
 
     private func persist() {

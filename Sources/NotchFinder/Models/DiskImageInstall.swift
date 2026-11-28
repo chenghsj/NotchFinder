@@ -1,6 +1,11 @@
 import Foundation
 
 enum DiskImageInstall {
+    struct Outcome: Sendable {
+        let reversals: [FileReversal]
+        let warning: String?
+    }
+
     struct Image {
         let file: URL
         let device: String?
@@ -47,7 +52,7 @@ enum DiskImageInstall {
             && source.deletingLastPathComponent().standardizedFileURL.path != directory.standardizedFileURL.path
     }
 
-    static func install(_ source: URL, into directory: URL = applicationsDirectory, cleanup: Bool) throws -> String? {
+    static func install(_ source: URL, into directory: URL = applicationsDirectory, cleanup: Bool) throws -> Outcome {
         let manager = FileManager.default
         guard canInstall(source, into: directory),
               let info = try? source.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
@@ -65,6 +70,7 @@ enum DiskImageInstall {
             return (image, try imageIdentifier(image.file))
         }
 
+        var reversals: [FileReversal] = []
         if manager.fileExists(atPath: destination.path) {
             let info = try? destination.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
             guard try cleanupCandidate.get() != nil,
@@ -79,20 +85,23 @@ enum DiskImageInstall {
             let draft = scratch.appendingPathComponent(name, isDirectory: true)
             try manager.copyItem(at: source, to: draft)
             try manager.moveItem(at: draft, to: destination)
+            reversals.append(.removeNewItem(destination))
         }
 
+        let warning: String?
         do {
-            guard let (image, identifier) = try cleanupCandidate.get() else { return nil }
+            guard let (image, identifier) = try cleanupCandidate.get() else { return Outcome(reversals: reversals, warning: nil) }
             try eject(image, identifier: identifier)
             guard try mountedRecords(for: image.file, in: imageInfo()).isEmpty,
                   try imageIdentifier(image.file).isEqual(identifier) else {
                 throw LocalFileOperations.Failure(L10n.text("無法確認安裝磁碟已退出或映像檔仍是同一個檔案"))
             }
-            try manager.trashItem(at: image.file, resultingItemURL: nil)
-            return nil
+            reversals.append(try .trash(image.file))
+            warning = nil
         } catch {
-            return L10n.text("已安裝「%@」，安裝磁碟清理未完成：%@", String(describing: name), String(describing: error.localizedDescription))
+            warning = L10n.text("已安裝「%@」，安裝磁碟清理未完成：%@", name, error.localizedDescription)
         }
+        return Outcome(reversals: reversals, warning: warning)
     }
 
     static func ejectMountedImage(at volume: URL) throws -> Bool {

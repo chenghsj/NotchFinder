@@ -37,6 +37,7 @@ struct PreferencesView: View {
     @Bindable var shortcuts: PanelShortcuts
     let tabs: BrowserTabs
     @Bindable var clipboardHistory: ClipboardHistory
+    let updates: AppUpdates
     var restoreSize: () -> Void
     var saveSize: () -> Void
 
@@ -99,7 +100,7 @@ struct PreferencesView: View {
             let cornerRadius: CGFloat = 8
             ScrollViewReader { scroll in
                 ScrollView {
-                    VStack(spacing: 0) {
+                    VStack(spacing: 4 * scale) {
                         ForEach(PreferencesPage.allCases, id: \.self) { page in
                             let selected = page == settings.preferencesPage
                             Button {
@@ -111,14 +112,6 @@ struct PreferencesView: View {
                                     .padding(.horizontal, 8 * scale)
                             }
                             .buttonStyle(PanelButtonStyle(selected: selected, cornerRadius: cornerRadius, accent: accent))
-                            .overlay {
-                                if selected && sidebarFocused {
-                                    RoundedRectangle(cornerRadius: cornerRadius)
-                                        .strokeBorder(accent)
-                                        .allowsHitTesting(false)
-                                        .accessibilityHidden(true)
-                                }
-                            }
                             .accessibilityAddTraits(selected ? .isSelected : [])
                             .id(page)
                         }
@@ -181,7 +174,7 @@ struct PreferencesView: View {
             .frame(width: sidebarDividerWidth)
             .contentShape(.rect)
 
-        return sidebarResizePointer(divider)
+        return divider.columnResizePointer()
             .gesture(
                 DragGesture(minimumDistance: 2, coordinateSpace: .global)
                     .updating($sidebarDragOffset) { drag, offset, _ in offset = drag.translation.width }
@@ -202,18 +195,6 @@ struct PreferencesView: View {
 
     private func clampedSidebarWidth(_ width: CGFloat) -> CGFloat {
         min(260, max(160, width))
-    }
-
-    @ViewBuilder
-    private func sidebarResizePointer<Divider: View>(_ divider: Divider) -> some View {
-        if #available(macOS 15, *) {
-            divider.pointerStyle(.columnResize)
-        } else {
-            divider.onHover { hovering in
-                let cursor: NSCursor = hovering ? .resizeLeftRight : .arrow
-                cursor.set()
-            }
-        }
     }
 
     private var triggers: some View {
@@ -249,12 +230,11 @@ struct PreferencesView: View {
 
             Section(L10n.text("軟體更新")) {
                 Toggle(L10n.text("自動檢查更新"), isOn: $settings.checksForUpdates)
-                Toggle(L10n.text("自動下載更新"), isOn: $settings.automaticallyDownloadsUpdates)
+                Toggle(L10n.text("自動下載並安裝更新"), isOn: $settings.automaticallyUpdates)
                     .disabled(!settings.checksForUpdates)
-                    .help(L10n.text("關閉自動安裝時，新版 DMG 會存到「下載項目」。"))
-                Toggle(L10n.text("自動安裝更新"), isOn: $settings.automaticallyInstallsUpdates)
-                    .disabled(!settings.checksForUpdates || !settings.automaticallyDownloadsUpdates)
                     .help(L10n.text("下載並驗證更新後，等你退出 Notch Finder 再安裝。"))
+                Button(updates.manualCheckTitle, action: updates.checkManually)
+                    .disabled(updates.manualCheckUnavailable)
                 if settings.updateReadyToInstall {
                     Text(L10n.text("更新已就緒，退出 Notch Finder 後安裝。"))
                         .foregroundStyle(.secondary)
@@ -298,16 +278,6 @@ struct PreferencesView: View {
                 }
             }
             Section(L10n.text("列表")) {
-                Picker(L10n.text("預設檔案顯示方式"), selection: $settings.defaultDisplayMode) {
-                    ForEach(FileDisplayMode.allCases, id: \.self) { mode in
-                        Label(mode.title, systemImage: mode.symbol).tag(mode)
-                    }
-                }
-                Picker(L10n.text("預設排序"), selection: $settings.fileSort) {
-                    ForEach(FileSort.allCases, id: \.self) { sort in Text(sort.title).tag(sort) }
-                }
-                Toggle(L10n.text("資料夾排在前面"), isOn: $settings.foldersFirst)
-                Toggle(L10n.text("下載項目和垃圾桶依加入日期分組"), isOn: $settings.groupsByAddedDate)
                 Toggle(L10n.text("顯示隱藏項目"), isOn: Binding(
                     get: { tabs.active.browser.showsHidden },
                     set: { tabs.active.browser.setShowsHidden($0) }

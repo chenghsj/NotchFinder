@@ -9,7 +9,9 @@ struct FileCommands: View {
         if !items.isEmpty {
             Button(L10n.text("開啟")) { browser.openItems(items) }
             if items.count == 1, let item = items.first, DiskImageInstall.canInstall(item) {
-                Button(L10n.text("安裝到「應用程式」")) { browser.installApplication(item, cleanupInstaller: cleanupInstaller) }
+                Button(L10n.text("安裝到「應用程式」")) {
+                    browser.installSelectedApplication(item, cleanupInstaller: cleanupInstaller)
+                }
                     .disabled(browser.isUpdatingFiles)
             }
             Button(L10n.text("快速查看")) { browser.showPreview(items) }
@@ -21,12 +23,14 @@ struct FileCommands: View {
                 Button(L10n.text("重新命名")) { browser.beginEditing(.rename(item)) }
                     .disabled(browser.isUpdatingFiles)
             }
+            Button(L10n.text("壓縮")) { browser.compressItems(items) }
+                .disabled(browser.isUpdatingFiles)
         }
 
         Button(L10n.text("貼上項目")) { browser.pasteItems(cleanupInstaller: cleanupInstaller) }
-            .disabled(browser.isUpdatingFiles || browser.showsRecentItems)
+            .disabled(browser.isUpdatingFiles || !browser.isBrowsingFolder)
         Button(L10n.text("新增資料夾")) { browser.beginEditing(.createFolder) }
-            .disabled(browser.isUpdatingFiles || browser.showsRecentItems)
+            .disabled(browser.isUpdatingFiles || !browser.isBrowsingFolder)
         Button(L10n.text("前往資料夾…")) { browser.beginEditing(.goToFolder) }
             .disabled(browser.isUpdatingFiles)
         Toggle(L10n.text("顯示隱藏項目"), isOn: Binding(get: { browser.showsHidden }, set: browser.setShowsHidden))

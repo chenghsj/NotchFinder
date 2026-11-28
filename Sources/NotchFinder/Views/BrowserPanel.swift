@@ -2,18 +2,42 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+private struct FileSelectionEffect: ViewModifier {
+    let browser: FileBrowser
+    let onChange: () -> Void
+
+    func body(content: Content) -> some View {
+        content.onChange(of: browser.selection, onChange)
+    }
+}
+
+private struct FileStatusText: View {
+    let browser: FileBrowser
+    let itemCount: Int
+
+    var body: some View { Text(message) }
+
+    private var message: String {
+        if browser.isUpdatingFiles { return L10n.text("正在處理檔案…") }
+        if browser.isLoading { return L10n.text("正在讀取…") }
+        let selectedCount = browser.selection.count
+        return selectedCount > 0 ? L10n.text("已選取 %@ 個", String(describing: selectedCount)) : L10n.text("%@ 個項目", String(describing: itemCount))
+    }
+}
+
 struct BrowserPanel: View {
     private static let breadcrumbFolderIcon = NSWorkspace.shared.icon(for: .folder)
     private static let breadcrumbVolumeIcon = NSWorkspace.shared.icon(forFile: "/")
     private static let sidebarEjectSymbol = "eject.fill"
 
     let tabs: BrowserTabs
-    let settings: NotchSettings
+    @Bindable var settings: NotchSettings
     let quickLookSources: QuickLookSources
     var close: () -> Void
     var openSettings: () -> Void
-    var clipboardPasteTarget: () -> String?
-    var pasteClipboard: (ClipboardHistory.Row) -> ClipboardPasteResult
+    var confirmEmptyTrash: () -> Void
+    var onFileSelectionChange: () -> Void
+    let clipboardPaste: ClipboardPaste
     var resizeHandle: PanelResizeHandle
     var onFileDragEnded: () -> Void
     @Environment(\.colorScheme) private var colorScheme
@@ -24,7 +48,7 @@ struct BrowserPanel: View {
     @State private var sidebarDropIndex: Int?
     @State private var hoveredEjectVolume: BrowserLocation.ID?
     @State private var ejectError: (title: String, message: String)?
-    @FocusState private var filterFocused: Bool
+    @State private var filterFocused = false
 
     private let sidebarDividerWidth: CGFloat = 7
     private let sidebarToolbarSpacing: CGFloat = 4
@@ -32,12 +56,8 @@ struct BrowserPanel: View {
     private let sidebarRowSpacing: CGFloat = 2
     private var browser: FileBrowser { tabs.active.browser }
     private var displayModeSelection: Binding<FileDisplayMode> {
-        let destination = browser.destination
-        return Binding {
-            settings.displayMode(for: destination)
-        } set: { mode in
-            settings.setDisplayMode(mode, for: destination)
-        }
+        let browser = browser
+        return Binding(get: { browser.displayMode }, set: browser.setDisplayMode)
     }
     private var clipboardHistory: ClipboardHistory { tabs.clipboardHistory }
     private var preset: PanelStylePreset { settings.appearance.preset(for: colorScheme) }
@@ -93,15 +113,13 @@ struct BrowserPanel: View {
         .accentColor(settings.appearance.accentColor(for: colorScheme))
         .tint(settings.appearance.accentColor(for: colorScheme))
         .fontDesign(settings.appearance.fontStyle.design)
+        .modifier(FileSelectionEffect(browser: browser, onChange: onFileSelectionChange))
         .onChange(of: browser.destination) { _, _ in restoreFilterState() }
         .onChange(of: tabs.active.id) { _, _ in restoreFilterState() }
-        .onChange(of: tabs.items.map { settings.displayMode(for: $0.browser.destination) }, initial: true) { _, modes in
-            for (tab, mode) in zip(tabs.items, modes) where mode != .columns {
-                tab.browser.resetColumns()
-            }
-        }
-        .onChange(of: settings.filterFocusRequest) { _, _ in
-            if !tabs.showsClipboard { showFilter() }
+        .onChange(of: settings.searchRequest) { _, request in
+            guard !tabs.showsClipboard, let request else { return }
+            if request.action == .toggle && showsFilter { hideFilter() }
+            else { showFilter() }
         }
         .onChange(of: settings.showsClipboardInSidebar) { _, visible in
             if !visible { tabs.closeClipboard() }
@@ -129,16 +147,10 @@ struct BrowserPanel: View {
             }
             if let clipboard {
                 ClipboardContentsView(rows: clipboard.rows, history: clipboardHistory,
-                                      focusSearchRequest: settings.filterFocusRequest,
-                                      pasteTargetName: clipboardPasteTarget(),
-                                      canPasteFiles: !browser.showsRecentItems,
+                                      searchRequest: settings.searchRequest,
                                       interfaceSize: settings.interfaceSize,
-                                      paste: pasteClipboard) {
-                    interfaceSizeSlider
-                    iconButton(L10n.text("重新整理剪貼簿"), symbol: "arrow.clockwise") {
-                        clipboardHistory.refreshPreview()
-                    }
-                }
+                                      listWidth: $settings.clipboardListWidth,
+                                      clipboardPaste: clipboardPaste)
                 .background(preset.contentColor)
             } else {
                 folderContents
@@ -149,18 +161,41 @@ struct BrowserPanel: View {
 
     @ViewBuilder
     private var folderContents: some View {
-        let listing = FileListing(browser: browser, settings: settings)
+        let listing = browser.listing
         if let request = browser.editing {
             FileNameEditor(browser: browser, request: request, textSize: panelTextSize)
                 .id(request.title)
             Divider()
         }
         FileList(browser: browser, settings: settings, listing: listing,
-                 releaseSearchFocus: { filterFocused = false }, onFileDragEnded: onFileDragEnded)
+                 releaseSearchFocus: { filterFocused = false }, onFileDragEnded: onFileDragEnded,
+                 columnCustomization: settings.fileListColumnStorage(for: browser.destination))
+            .defaultAppStorage(settings.defaults)
+            .id(browser.destination)
             .id(tabs.active.id)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(preset.contentColor)
         Divider()
+        if browser.showsTrash, let request = browser.trashRecovery {
+            VStack(alignment: .leading, spacing: 6) {
+                let hasApp = request.items.contains { ($0.name as NSString).pathExtension.lowercased() == "app" }
+                Text(hasApp
+                     ? L10n.text("請檢查「App 管理」是否允許 Notch Finder 刪除其他 App，再按「重試」。也可以在 Finder 選取「立即刪除⋯」。")
+                     : L10n.text("你可以在 Finder 選取「立即刪除⋯」，或調整權限後重試。"))
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    if hasApp { Button(L10n.text("App 管理設定⋯"), action: FileAccess.openAppManagementSettings) }
+                    Button(L10n.text("在 Finder 中顯示"), action: browser.revealRemainingTrashItems)
+                    Button(L10n.text("重試")) { browser.emptyTrash(retrying: request) }
+                }
+                .controlSize(.small)
+                .disabled(browser.isUpdatingFiles)
+            }
+            .font(settings.panelFont(size: panelTextSize - 1))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(8)
+            Divider()
+        }
         pathBar
         footer(for: listing)
     }
@@ -173,11 +208,12 @@ struct BrowserPanel: View {
                     .font(settings.panelFont(size: panelTextSize + 2, weight: .semibold))
                     .accessibilityAddTraits(.isHeader)
                 Spacer()
-                if let current, current.contents.hasFiles, !browser.showsRecentItems {
+                if let row = current.map(ClipboardHistory.Row.current),
+                   case .folder(let available) = clipboardPaste.destination(for: row) {
                     Button(L10n.text("貼到目前資料夾")) {
-                        _ = pasteClipboard(.current(current))
+                        Task { await clipboardPaste.paste(row) }
                     }
-                    .disabled(browser.isUpdatingFiles)
+                    .disabled(!available)
                     .help(browser.title)
                 }
             }
@@ -197,7 +233,7 @@ struct BrowserPanel: View {
                     .frame(width: 1)
             }
             .contentShape(.rect)
-        return sidebarResizePointer(divider)
+        return divider.columnResizePointer()
             .gesture(
                 DragGesture(minimumDistance: 2, coordinateSpace: .global)
                     .onChanged { drag in
@@ -220,18 +256,6 @@ struct BrowserPanel: View {
                 @unknown default: break
                 }
             }
-    }
-
-    @ViewBuilder
-    private func sidebarResizePointer<Divider: View>(_ divider: Divider) -> some View {
-        if #available(macOS 15, *) {
-            divider.pointerStyle(.columnResize)
-        } else {
-            divider.onHover { hovering in
-                let cursor: NSCursor = hovering ? .resizeLeftRight : .arrow
-                cursor.set()
-            }
-        }
     }
 
     private var toolbar: some View {
@@ -313,11 +337,11 @@ struct BrowserPanel: View {
     private var historyButtons: some View {
         toolbarGroup {
             HStack(spacing: 0) {
-                groupedToolbarButton(L10n.text("上一個資料夾"), symbol: "chevron.backward", action: browser.goBack)
-                    .disabled(!browser.canGoBack)
+                groupedToolbarButton(L10n.text("上一個資料夾"), symbol: "chevron.backward",
+                                     isEnabled: browser.canGoBack, action: browser.goBack)
                 Divider().frame(height: 13 * toolbarScale).accessibilityHidden(true)
-                groupedToolbarButton(L10n.text("下一個資料夾"), symbol: "chevron.forward", action: tabs.goForward)
-                    .disabled(!browser.canGoForward)
+                groupedToolbarButton(L10n.text("下一個資料夾"), symbol: "chevron.forward",
+                                     isEnabled: browser.canGoForward, action: tabs.goForward)
             }
         }
     }
@@ -351,24 +375,27 @@ struct BrowserPanel: View {
     }
 
     private func groupedToolbarButton(_ title: String, symbol: String, selected: Bool = false,
-                                      action: @escaping () -> Void) -> some View {
+                                      isEnabled: Bool = true, action: @escaping () -> Void) -> some View {
         let isDark = colorScheme == .dark
         let selectedGlyph = isDark ? Color.white : Color.black
         return Button(action: action) {
             toolbarSymbol(symbol)
                 .foregroundStyle(selected ? selectedGlyph : .primary)
+                .opacity(isEnabled ? 1 : 0.4)
                 .frame(width: toolbarButtonSide, height: toolbarButtonSide)
                 .background {
                     if selected {
                         Circle()
-                            .fill(Color(white: isDark ? 0.35 : 0.86))
-                            .overlay { Circle().strokeBorder(selectedGlyph.opacity(0.12)) }
+                            .fill(isDark ? Color(white: 0.35) : Color.black.opacity(0.06))
+                            .overlay { Circle().strokeBorder(selectedGlyph.opacity(isDark ? 0.12 : 0.06)) }
                             .padding(toolbarGroupInset)
                     }
                 }
                 .contentShape(.rect)
+                .modifier(GroupedToolbarButtonHover(inset: toolbarGroupInset, enabled: isEnabled && !selected))
         }
         .buttonStyle(.plain)
+        .disabled(!isEnabled)
         .accessibilityLabel(title)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .help(title)
@@ -428,10 +455,9 @@ struct BrowserPanel: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: panelIconSize))
                 .foregroundStyle(.secondary)
-            TextField(L10n.text("搜尋"), text: $browser.filter)
-                .textFieldStyle(.plain)
-                .focused($filterFocused)
-                .accessibilityLabel(L10n.text("篩選此資料夾"))
+            FolderSearchField(text: $browser.filter, focused: $filterFocused,
+                              textSize: panelTextSize, fontStyle: settings.appearance.fontStyle)
+                .frame(maxWidth: .infinity)
                 .task {
                     // Wait for the new field to enter the window's key-view loop.
                     await Task.yield()
@@ -560,17 +586,18 @@ struct BrowserPanel: View {
                                 .padding(9)
                         }
                         ForEach(favorites) { location in
-                            sidebarRow(location).onDrag { SidebarFolderDrop.provider(for: location.url) }
+                            sidebarRow(location)
+                                .onDrag { SidebarFolderDrop.provider(for: location.url) }
                         }
                     }
                     .frame(maxWidth: .infinity, minHeight: 26, alignment: .topLeading)
                     .contentShape(.rect)
                     .overlay(alignment: .top) {
-                        if let sidebarDropIndex {
+                        if let index = sidebarDropIndex {
                             Rectangle()
                                 .fill(Color(nsColor: .secondaryLabelColor))
                                 .frame(height: 1)
-                                .offset(y: CGFloat(sidebarDropIndex) * (sidebarRowHeight + sidebarRowSpacing))
+                                .offset(y: CGFloat(index) * (sidebarRowHeight + sidebarRowSpacing))
                                 .accessibilityHidden(true)
                                 .allowsHitTesting(false)
                         }
@@ -586,6 +613,8 @@ struct BrowserPanel: View {
                         sidebarHeading(L10n.text("位置"))
                         ForEach(places) { location in
                             sidebarRow(location, canEject: locations.canEject(location))
+                                .fileDrop(location.url == locations.trashDirectory ? .trash : .folder(location.url),
+                                          browser: browser)
                         }
                     }
                 }
@@ -594,10 +623,14 @@ struct BrowserPanel: View {
                     VStack(alignment: .leading, spacing: sidebarRowSpacing) {
                         sidebarHeading(L10n.text("標籤"))
                         ForEach(tags, id: \.self) { tag in
-                            sidebarShortcut(tag, symbol: "tag") {
-                                let query = NSPredicate(format: "%K == %@", "kMDItemUserTags", tag)
-                                return NSWorkspace.shared.showSearchResults(forQueryString: query.predicateFormat)
+                            let selected = !tabs.showsClipboard && browser.destination == .tag(tag)
+                            Button {
+                                tabs.showTag(tag)
+                            } label: {
+                                sidebarLabel(tag, symbol: "tag", selected: selected)
                             }
+                            .buttonStyle(PanelButtonStyle(selected: selected))
+                            .accessibilityAddTraits(selected ? .isSelected : [])
                         }
                     }
                 }
@@ -616,17 +649,9 @@ struct BrowserPanel: View {
             .accessibilityAddTraits(.isHeader)
     }
 
-    private func sidebarShortcut(_ title: String, symbol: String, action: @escaping () -> Bool) -> some View {
-        Button { _ = action() } label: {
-            sidebarLabel(title, symbol: symbol, selected: false)
-        }
-        .buttonStyle(PanelButtonStyle())
-    }
-
     private func sidebarRow(_ location: BrowserLocation, canEject: Bool = false) -> some View {
         let sidebar = browser.sidebar
-        let selected = !tabs.showsClipboard && !browser.showsRecentItems
-            && location.url == browser.directory
+        let selected = !tabs.showsClipboard && browser.destination == .folder(location.url)
         return Button {
             tabs.navigate(to: location.url)
         } label: {
@@ -638,7 +663,10 @@ struct BrowserPanel: View {
         .buttonStyle(PanelButtonStyle(selected: selected, highlightsOnHover: hoveredEjectVolume != location.id))
         .accessibilityAddTraits(selected ? .isSelected : [])
         .contextMenu {
-            if canEject {
+            if location.url == sidebar.trashDirectory {
+                Button(L10n.text("清空垃圾桶…"), role: .destructive, action: confirmEmptyTrash)
+                    .disabled(browser.isUpdatingFiles)
+            } else if canEject {
                 Button(L10n.text("退出「%@」", location.name), systemImage: Self.sidebarEjectSymbol) { eject(location) }
                     .disabled(sidebar.isEjectingVolume)
             } else if sidebar.canRemove(location) {
@@ -707,8 +735,8 @@ struct BrowserPanel: View {
     private var pathBar: some View {
         HStack(spacing: 7) {
             Group {
-                if browser.showsRecentItems {
-                    Label(L10n.text("最近項目"), systemImage: "clock")
+                if let search = browser.destination.spotlightSearch {
+                    Label(browser.title, systemImage: search == .recents ? "clock" : "tag")
                         .font(settings.panelFont(size: panelTextSize - 1))
                         .foregroundStyle(.secondary)
                 } else {
@@ -716,6 +744,11 @@ struct BrowserPanel: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            if browser.showsTrash {
+                Button(L10n.text("清空垃圾桶…"), action: confirmEmptyTrash)
+                    .controlSize(.small)
+                    .disabled(browser.isUpdatingFiles)
+            }
             Button(L10n.text("上一層"), systemImage: "arrow.up", action: tabs.goUp)
                 .labelStyle(.iconOnly)
                 .buttonStyle(.plain)
@@ -800,7 +833,8 @@ struct BrowserPanel: View {
 
     private func footer(for listing: FileListing) -> some View {
         HStack(spacing: 9) {
-            Text(statusText(for: listing))
+            let itemCount = listing.columns.isEmpty ? listing.entries.count : listing.entries(in: browser.activeColumn).count
+            FileStatusText(browser: browser, itemCount: itemCount)
                 .foregroundStyle(.secondary)
             if let error = browser.openError {
                 Text(error)
@@ -809,53 +843,14 @@ struct BrowserPanel: View {
                     .help(error)
             }
             Spacer(minLength: 0)
-            interfaceSizeSlider
+            if listing.displayMode == .icons {
+                NativeSlider(title: L10n.text("圖示大小"), value: $settings.gridIconSize,
+                             bounds: NotchSettings.gridIconSizes)
+                    .frame(width: 96)
+                    .help(L10n.text("圖示大小"))
+            }
         }
         .modifier(PanelFooterStyle(textSize: panelTextSize - 1))
-    }
-
-    private var interfaceSizeSlider: some View {
-        let bounds = 0...Double(FileDisplaySize.allCases.count - 1)
-        let value = Binding(
-            get: { interfaceSizeIndex },
-            set: { setInterfaceSize(at: $0) }
-        )
-        return HStack(spacing: 6) {
-            Button(L10n.text("最小介面"), systemImage: "rectangle.on.rectangle") { setInterfaceSize(at: bounds.lowerBound) }
-                .font(.system(size: panelIconSize - 3))
-                .foregroundStyle(.secondary)
-            NativeSlider(title: L10n.text("介面大小"), value: value, bounds: bounds, step: 1)
-            .accessibilityValue(settings.interfaceSize.title)
-            .accessibilityAdjustableAction { direction in
-                switch direction {
-                case .increment: setInterfaceSize(at: interfaceSizeIndex + 1)
-                case .decrement: setInterfaceSize(at: interfaceSizeIndex - 1)
-                @unknown default: break
-                }
-            }
-            .onKeyPress(keys: [.leftArrow, .rightArrow]) { press in
-                guard press.modifiers.isEmpty else { return .ignored }
-                setInterfaceSize(at: interfaceSizeIndex + (press.key == .leftArrow ? -1 : 1))
-                return .handled
-            }
-            Button(L10n.text("最大介面"), systemImage: "rectangle.on.rectangle.fill") { setInterfaceSize(at: bounds.upperBound) }
-                .font(.system(size: panelIconSize))
-                .foregroundStyle(.secondary)
-        }
-        .buttonStyle(.plain)
-        .labelStyle(.iconOnly)
-        .frame(width: 196)
-        .help(L10n.text("介面大小：%@", String(describing: settings.interfaceSize.title)))
-    }
-
-    private var interfaceSizeIndex: Double {
-        Double(FileDisplaySize.allCases.firstIndex(of: settings.interfaceSize) ?? 0)
-    }
-
-    private func setInterfaceSize(at position: Double) {
-        let sizes = FileDisplaySize.allCases
-        let index = min(sizes.count - 1, max(0, Int(position.rounded())))
-        if settings.interfaceSize != sizes[index] { settings.interfaceSize = sizes[index] }
     }
 
     private func showFilter() {
@@ -872,14 +867,6 @@ struct BrowserPanel: View {
     private func restoreFilterState() {
         filterFocused = false
         showsFilter = !browser.filter.isEmpty
-    }
-
-    private func statusText(for listing: FileListing) -> String {
-        if browser.isUpdatingFiles { return L10n.text("正在處理檔案…") }
-        if browser.isLoading { return L10n.text("正在讀取…") }
-        let selectedCount = listing.selected(browser.selection).count
-        let itemCount = listing.columns.isEmpty ? listing.entries.count : listing.entries(in: browser.activeColumn).count
-        return selectedCount > 0 ? L10n.text("已選取 %@ 個", String(describing: selectedCount)) : L10n.text("%@ 個項目", String(describing: itemCount))
     }
 
     @ViewBuilder
@@ -930,6 +917,24 @@ struct BrowserPanel: View {
         .buttonStyle(PanelButtonStyle(selected: selected, cornerRadius: 13))
         .accessibilityLabel(title)
         .help(title)
+    }
+}
+
+private struct GroupedToolbarButtonHover: ViewModifier {
+    let inset: CGFloat
+    let enabled: Bool
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var isHovered = false
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                if enabled && isHovered {
+                    let tint = colorScheme == .dark ? Color.white : Color.black
+                    Circle().fill(tint.opacity(0.045)).padding(inset)
+                }
+            }
+            .onHover { isHovered = $0 }
     }
 }
 

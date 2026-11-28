@@ -4,6 +4,7 @@ struct FolderPreviewContents: View {
     let folder: URL
     let includeHidden: Bool
     let interfaceSize: FileDisplaySize
+    let didFinishLoading: @MainActor () async -> Void
     @State private var entries: [FileEntry]?
     @State private var readError: String?
 
@@ -24,12 +25,18 @@ struct FolderPreviewContents: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
+            let result: Result<[FileEntry], Error>
             do {
-                let result = try await FileBrowser.readContents(of: folder, includeHidden: includeHidden)
-                try Task.checkCancellation()
-                entries = result
+                result = .success(try await FileBrowser.readContents(of: folder, includeHidden: includeHidden))
             } catch {
-                if !Task.isCancelled { readError = error.localizedDescription }
+                result = .failure(error)
+            }
+            guard !Task.isCancelled else { return }
+            await didFinishLoading()
+            guard !Task.isCancelled else { return }
+            switch result {
+            case .success(let files): entries = files
+            case .failure(let error): readError = error.localizedDescription
             }
         }
     }

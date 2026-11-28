@@ -24,13 +24,17 @@ struct FileTiles: View {
     }
 
     private var grid: some View {
-        GeometryReader { viewport in
+        let base = interfaceSize.grid
+        let iconSide = CGFloat(settings.gridIconSize)
+        let tileWidth = base.width + (iconSide - base.icon)
+        let tileHeight = base.height + (iconSide - base.icon)
+        return GeometryReader { viewport in
             ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: interfaceSize.grid.width), spacing: 8)], spacing: 9) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: tileWidth), spacing: 8)], spacing: 9) {
                     ForEach(entries) { entry in
-                        tile(entry, side: interfaceSize.grid.icon, nameLines: 2)
+                        tile(entry, side: iconSide, nameLines: 2)
                             .frame(maxWidth: .infinity)
-                            .frame(height: interfaceSize.grid.height)
+                            .frame(height: tileHeight)
                     }
                 }
                 .padding(10)
@@ -39,7 +43,7 @@ struct FileTiles: View {
                     Color.clear
                         .contentShape(.rect)
                         .onTapGesture {
-                            browser.selection.removeAll()
+                            browser.selectItems([])
                             anchor = nil
                         }
                 }
@@ -68,10 +72,9 @@ struct FileTiles: View {
         }
     }
 
-    @ViewBuilder
     private func tile(_ entry: FileEntry, side: CGFloat, nameLines: Int) -> some View {
         let selected = browser.selection.contains(entry.id)
-        let button = Button { select(entry.id) } label: {
+        return Button { select(entry.id) } label: {
             VStack(spacing: 6) {
                 if layout == .filmstrip && !entry.isFolder {
                     GalleryThumbnail(entry: entry, side: side, loadsFileIcon: browser.fileIconsEnabled)
@@ -94,14 +97,10 @@ struct FileTiles: View {
                          cleanupInstaller: settings.cleansDiskImageAfterInstall)
         }
         .help(entry.name)
-
-        if layout == .filmstrip && selected && browser.selection.count > 1 {
-            button.background(FileTileDragSource(files: {
-                entries.filter { browser.selection.contains($0.id) }.map(\.url)
-            }, didEnd: onFileDragEnded))
-        } else {
-            button.onDrag { NSItemProvider(object: entry.url as NSURL) }
-        }
+        .folderDrop(entry.canExpand ? entry.url : nil, browser: browser)
+        .background(FileDragSource(entry: entry, entries: entries, browser: browser,
+                                   allowsMovingSelection: true, didEnd: onFileDragEnded,
+                                   selectOnPress: { select(entry.id) }))
     }
 
     private func select(_ item: URL) {
@@ -111,57 +110,15 @@ struct FileTiles: View {
            let first = entries.firstIndex(where: { $0.id == anchor }),
            let last = entries.firstIndex(where: { $0.id == item }) {
             let range = Set(entries[min(first, last)...max(first, last)].map(\.id))
-            browser.selection = modifiers.contains(.command) ? browser.selection.union(range) : range
+            browser.selectItems(modifiers.contains(.command) ? browser.selection.union(range) : range)
             return
         }
         if modifiers.contains(.command) {
-            if browser.selection.contains(item) { browser.selection.remove(item) }
-            else { browser.selection.insert(item) }
+            browser.selectItems(browser.selection.symmetricDifference([item]))
         } else {
-            browser.selection = [item]
+            browser.selectItems([item])
         }
         anchor = item
-    }
-}
-
-private struct FileTileDragSource: NSViewRepresentable {
-    let files: () -> [URL]
-    let didEnd: () -> Void
-
-    func makeNSView(context: Context) -> FileTileDragTarget { FileTileDragTarget() }
-
-    func updateNSView(_ view: FileTileDragTarget, context: Context) {
-        view.files = files
-        view.didEnd = didEnd
-    }
-}
-
-final class FileTileDragTarget: NSView, NSDraggingSource {
-    var files: () -> [URL] = { [] }
-    var didEnd: () -> Void = {}
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    func beginDrag(with event: NSEvent) -> Bool {
-        guard let window, window === event.window else { return false }
-        let pointer = convert(event.locationInWindow, from: nil)
-        let iconFrame = NSRect(x: pointer.x - 16, y: pointer.y - 16, width: 32, height: 32)
-        let items = files().map { file in
-            let item = NSDraggingItem(pasteboardWriter: file as NSURL)
-            item.setDraggingFrame(iconFrame, contents: NSWorkspace.shared.icon(forFile: file.path))
-            return item
-        }
-        guard !items.isEmpty else { return false }
-        beginDraggingSession(with: items, event: event, source: self).draggingFormation = .pile
-        return true
-    }
-
-    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
-        [.copy, .move, .link]
-    }
-
-    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
-        didEnd()
     }
 }
 

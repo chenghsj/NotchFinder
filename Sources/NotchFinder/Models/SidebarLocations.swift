@@ -48,6 +48,7 @@ final class SidebarLocations {
     private let standardFavorites: [BrowserLocation]
     private let optionalFavoritePaths: Set<String>
     private let standardLocations: [BrowserLocation]
+    let trashDirectory: URL?
     private var mounts: [MountedLocation] = []
     private(set) var isEjectingVolume = false
     private var favorites: [URL]
@@ -58,9 +59,11 @@ final class SidebarLocations {
     var showsRecents: Bool { didSet { defaults.set(showsRecents, forKey: "showsSidebarRecents") } }
     var showsTags: Bool { didSet { defaults.set(showsTags, forKey: "showsSidebarTags") } }
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard,
+         trashDirectory: URL? = FileManager.default.urls(for: .trashDirectory, in: .userDomainMask).first) {
         self.defaults = defaults
         let manager = FileManager.default
+        self.trashDirectory = trashDirectory?.standardizedFileURL
         let home = manager.homeDirectoryForCurrentUser.standardizedFileURL
         let userFolders: [(FileManager.SearchPathDirectory, String, String, Bool)] = [
             (.desktopDirectory, "桌面", "menubar.dock.rectangle", true),
@@ -88,8 +91,8 @@ final class SidebarLocations {
             return BrowserLocation(title: .localized(titleKey), symbol: "icloud", url: url.standardizedFileURL)
         }
         places.append(BrowserLocation(title: .localized("個人資料夾"), symbol: "house", url: home))
-        if let trash = manager.urls(for: .trashDirectory, in: .userDomainMask).first {
-            places.append(BrowserLocation(title: .localized("垃圾桶"), symbol: "trash", url: trash.standardizedFileURL))
+        if let trashDirectory {
+            places.append(BrowserLocation(title: .localized("垃圾桶"), symbol: "trash", url: trashDirectory))
         }
         standardLocations = places
         favorites = (defaults.stringArray(forKey: "favoriteFolders") ?? [])
