@@ -45,5 +45,8 @@ SIGNATURE="$(/usr/bin/xmllint --nonet --xpath 'string(//enclosure/@*[local-name(
 "$TOOLS/sign_update" --account "$ACCOUNT" --verify "$FEED"
 
 printf '%s\n' "$SIGNATURE" > "$DMG.sig"
+INSTALL_DMG="$(dirname "$DMG")/NotchFinder-arm64.dmg"
+cp "$STAGE/archives/$NAME" "$INSTALL_DMG"
 cp "$FEED" "$PROJECT_DIR/updates/preview.xml"
-printf 'Upload %s and %s to v%s, then publish updates/preview.xml on main.\n' "$NAME" "$NAME.sig" "$VERSION"
+printf 'Upload to the v%s draft release:\n' "$VERSION"
+printf 'gh release upload v%s --repo chenghsj/NotchFinder %q %q %q\n' "$VERSION" "$DMG" "$DMG.sig" "$INSTALL_DMG"

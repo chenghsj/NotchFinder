@@ -10,14 +10,14 @@ Requires macOS 14 Sonoma or later. A notch is optional. The interface is availab
 
 The prebuilt DMG requires an Apple Silicon Mac running macOS 14 Sonoma or later.
 
-Download the `.dmg` from **Assets**, then open it in Finder. [Latest release](https://github.com/chenghsj/NotchFinder/releases/latest)
+[Download the latest DMG for Apple Silicon](https://github.com/chenghsj/NotchFinder/releases/latest/download/NotchFinder-arm64.dmg) and open it in Finder.
 
-To download and open the `v0.1.2` DMG from Terminal, run the following.
+You can also download and open the latest DMG from Terminal.
 
 ```sh
-dmg="$HOME/Downloads/NotchFinder-0.1.2-arm64.dmg"
+dmg="$HOME/Downloads/NotchFinder-arm64.dmg"
 curl -fL -o "$dmg" \
-  "https://github.com/chenghsj/NotchFinder/releases/download/v0.1.2/NotchFinder-0.1.2-arm64.dmg" &&
+  "https://github.com/chenghsj/NotchFinder/releases/latest/download/NotchFinder-arm64.dmg" &&
   open "$dmg"
 ```
 
@@ -66,7 +66,7 @@ uvx --from dmgbuild==1.6.7 dmgbuild -s script/dmg_settings.py \
 
 1. Build the app with its release version and a build number higher than the last published build. Set `NOTCH_FINDER_VERSION` and `NOTCH_FINDER_BUILD_NUMBER` in the environment when running `./script/build_and_run.sh --build`. Name the packaged DMG `NotchFinder-VERSION-arm64.dmg` for an Apple Silicon build.
 2. From the release maintainer's Mac, run `SPARKLE_BIN_DIR=/path/to/sparkle/bin bash script/sign_preview_update.sh dist/NotchFinder-VERSION-arm64.dmg`. Use the signing tools from the pinned Sparkle release. The script uses the `local.notchfinder.preview` key in the login Keychain and produces the detached DMG signature and the signed `updates/preview.xml` feed.
-3. Publish the DMG and its `.sig` file together in the matching GitHub Release. Once both assets are publicly available, publish the generated `updates/preview.xml` on `main`.
+3. Create a draft GitHub Release for the matching tag. Run the upload command printed by the signing script to attach the versioned DMG, its `.sig` file, and the identical `NotchFinder-arm64.dmg` used by the latest download link. Publish the release, then publish the generated `updates/preview.xml` on `main`.
 
 ## Usage
 
